@@ -1808,11 +1808,11 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 	// Repoint all output to any supplied file
 #ifndef __WINDOWS__
 	const char* tmp_filename = "/tmp/hatari-tmp.txt";
-	FILE* file = fopen(tmp_filename, "rw");
-	if (file)
+	FILE* tmp_file = fopen(tmp_filename, "w");
+	if (tmp_file)
 	{
 		// Save this output so that we can pipe to it later
-		state->consoleOutputFile = file;
+		state->consoleOutputFile = tmp_file;
 	}
 #endif
 	RemoteDebug_OpenDebugOutput(state);
@@ -1824,6 +1824,7 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 
 	fflush(debugOutput);
 	RemoteDebug_CloseDebugOutput(state);
+	fclose(tmp_file);
 	free(command);
 
 
@@ -1831,6 +1832,8 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 
 #ifdef __WINDOWS__
     FILE * file = fopen(state->consoleOutputFilename, "r");
+#else
+	FILE * file = fopen(tmp_filename, "r");
 #endif
     if (file) {
 		// Seek to the end to determine file size
