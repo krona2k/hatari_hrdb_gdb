@@ -1280,7 +1280,7 @@ void DebugUI(debug_reason_t reason)
 		 */
 
 		/* Pass control to remote debugging */
-		(void) remoteDebugcmdCallback();
+		(void) remoteDebugcmdCallback(reason);
 	}
 	else
 	{

@@ -8,6 +8,9 @@
  * 
  */
 
+#define GDB_SERVER
+#define GDB_SERVER_TRACE
+
 #include "remotedebug.h"
 
 #include "config.h"
@@ -55,11 +58,14 @@
 #include "video.h"	/* FIXME: video.h is dependent on HBL_PALETTE_LINES from screen.h */
 #include "reset.h"
 
+#include "debugInfo.h"
+
 // TCP port for remote debugger access
 #define RDB_PORT                   (56001)
+#define GDB_PORT                   (2345)
 
 // Max character count in a command sent to Hatari
-#define RDB_INPUT_TMP_SIZE         (300)
+#define RDB_INPUT_TMP_SIZE         (1024)
 
 // Starting size of the growing buffer containing commands to process
 #define RDB_CMD_BUFFER_START_SIZE  (512)
@@ -68,7 +74,7 @@
 #define RDB_MEM_BLOCK_SIZE         (2048)
 
 // How many bytes in the internal network send buffer
-#define RDB_SEND_BUFFER_SIZE       (512)
+#define RDB_SEND_BUFFER_SIZE       (65536)
 
 // Network timeout when in break loop, to allow event handler update.
 // Currently 0.5sec
@@ -174,10 +180,19 @@ static void RemoteDebugBuffer_RemoveStart(RemoteDebugBuffer* buf, size_t count)
 	buf->write_pos -= count;
 }
 
+// Enum for supported protocols
+typedef enum RemoteDebugProtocol
+{
+    PROTOCOL_HRDB,  // Hatari Remote Debug Protocol
+    PROTOCOL_GDB    // GNU Debugger Protocol
+} RemoteDebugProtocol;
+
 // -----------------------------------------------------------------------------
 // Structure managing connection state
 typedef struct RemoteDebugState
 {
+	RemoteDebugProtocol protocol;		/* protocol in use */
+	int port;							/* TCP port number to listen on */
 	int SocketFD;						/* handle for the port/socket. -1 if not available */
 	int AcceptedFD;						/* handle for the accepted connection from client, or
 											-1 if not connected */
@@ -1480,6 +1495,686 @@ static int RemoteDebug_Parse(const char *input_orig, RemoteDebugState* state)
 	return retval;
 }
 
+#ifdef GDB_SERVER_TRACE
+static void GDBServer_Printf(LOGTYPE nType, const char * pszFormat, ...) {
+	va_list args;
+	va_start(args, pszFormat);
+
+	static struct timeval tv0 = {0,0};
+	if (tv0.tv_sec == 0 && tv0.tv_usec == 0) {
+		gettimeofday(&tv0, NULL);
+	}
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+	printf("[%02ld.%03ld] GDB ", tv.tv_sec - tv0.tv_sec, tv.tv_usec / 1000);
+    vprintf(pszFormat, args);
+
+	va_end(args);
+}
+#define GDBServer_trace GDBServer_Printf
+#else
+#define GDBServer_trace Log_Printf
+#endif
+
+static unsigned char GDBServer_compute_checksum(const char * packet) {
+	int length = strlen(packet);
+	unsigned char checksum = 0;
+	for (int i = 0; i < length; i++)
+		checksum += packet[i];
+	return checksum;
+}
+
+static char * GDBServer_generate_reply(const char * packet) {
+	int length = strlen(packet);
+	char * reply = malloc(length + 6 + 16); // +6 for "+$" + "#" + 2 checksum + terminator
+	unsigned char checksum = GDBServer_compute_checksum(packet);
+	sprintf(reply, "+$%s#%02x", packet, checksum);
+	return reply;
+}
+
+static char * GDBServer_ack_reply(void) {
+	char * reply = malloc(2);
+	reply[0] = '+';
+	reply[1] = 0;
+	return reply;
+}
+
+static char * GDBServer_read_registers(int threadId) {
+	char * reply = malloc(512);
+	reply[0] = 0;
+
+	// Normal regs D0-D7, A0-A7
+	for (int register_index = 0; register_index < 16; ++register_index)
+		sprintf(reply + strlen(reply), "%08x", Regs[register_index]);
+
+	// Special regs
+	sprintf(reply + strlen(reply), "%08x", M68000_GetSR()); // SR
+	sprintf(reply + strlen(reply), "%08x", M68000_GetPC()); // PC
+
+	char * result = GDBServer_generate_reply(reply);
+	free(reply);
+	return result;
+}
+
+static char * GDBServer_write_registers(const char * values) {
+	char register32[9];
+
+	// Normal regs
+	for (int register_index = 0; register_index < 16; ++register_index) {
+		strncpy(register32, values + register_index * 8, 8);
+		register32[8] = 0;
+		unsigned int register_value = strtoul(register32, NULL, 16);
+		if (register_index <= REG_A7)
+			Regs[REG_D0 + register_index] = register_value;
+		else if (register_index == REG_A7 + 1) // SR
+			M68000_SetSR((unsigned short)register_value);
+		else if (register_index == REG_A7 + 2) // PC
+			M68000_SetPC(register_value);
+	}
+
+	return GDBServer_generate_reply("OK");
+}
+
+static char * GDBServer_read_register(const int register_index) {
+	char * reply = malloc(32);
+	reply[0] = 0;
+
+	enum regnames {
+		D0, D1, D2, D3, D4, D5, D6, D7,
+		A0, A1, A2, A3, A4, A5, A6, A7,
+		SR, PC
+	};
+
+	switch (register_index) {
+	case D0: case D1: case D2: case D3: case D4: case D5: case D6: case D7:
+	case A0: case A1: case A2: case A3: case A4: case A5: case A6: case A7:
+		sprintf(reply, "%08x", Regs[register_index]);
+		break;
+	case SR:
+		sprintf(reply, "%08x", M68000_GetSR()); // SR
+		break;
+	case PC:
+		sprintf(reply, "%08x", M68000_GetPC()); // PC
+		break;
+	default:
+		// sprintf(reply, "xxxxxxxx");
+		sprintf(reply, "00000000");
+	}
+
+	char * result = GDBServer_generate_reply(reply);
+	free(reply);
+	return result;
+}
+
+static char * GDBServer_read_memory(const unsigned int address, const unsigned int length) {
+	char * reply = malloc(length * 2 + 1);
+	reply[0] = 0;
+
+	for (size_t i = 0; i < length; i++) {
+		unsigned char byte = STMemory_ReadByte(address + i);
+		sprintf(reply + 2 * i, "%02x", byte);
+	}
+
+	char * result = GDBServer_generate_reply(reply);
+	free(reply);
+	return result;
+}
+
+static char * GDBServer_write_memory(const unsigned int address, const unsigned int length, const char * data_hexa) {
+	// Write the memory
+	for (size_t i = 0; i < length; i++) {
+		unsigned char byte;
+		sscanf(data_hexa + i * 2, "%02hhx", &byte);
+		STMemory_WriteByte(address + i, byte);
+	}
+
+	return GDBServer_generate_reply("OK");
+}
+
+static char * GDBServer_section_offsets(void) {
+	// ‘qOffsets’
+    // Get section offsets that the target used when relocating the downloaded image.
+
+    // Reply:
+    // ‘Text=xxx;Data=yyy[;Bss=zzz]’
+    //     Relocate the Text section by xxx from its original address. Relocate the Data section by yyy from its original address.
+	//     If the object file format provides segment information (e.g. ELF ‘PT_LOAD’ program headers), GDB will relocate entire segments by the supplied offsets.
+    //     Note: while a Bss offset may be included in the response, GDB ignores this and instead applies the Data offset to the Bss section.
+    // ‘TextSeg=xxx[;DataSeg=yyy]’
+    //     Relocate the first segment of the object file, which conventionally contains program code, to a starting address of xxx.
+	//     If ‘DataSeg’ is specified, relocate the second segment, which conventionally contains modifiable data, to a starting address of yyy.
+	//     GDB will report an error if the object file does not contain segment information, or does not contain at least as many segments as mentioned in the reply.
+	//     Extra segments are kept at fixed offsets relative to the last relocated segment. 
+
+
+	char * reply = malloc(64);
+	reply[0] = 0;
+
+	uint32_t text = DebugInfo_GetTEXT();
+	uint32_t data = DebugInfo_GetDATA();
+	uint32_t bss = DebugInfo_GetBSS();
+
+	//‘Text=xxx;Data=yyy[;Bss=zzz]’
+	// 5    +8     +6+8  +5   +8  = 40
+	sprintf(reply, "Text=%08x;Data=%08x;Bss=%08x", text, data, bss); 
+
+	char * result = GDBServer_generate_reply(reply);
+	free(reply);
+	return result;
+}
+
+static char * GDBServer_add_breakpoint(const unsigned int type, const unsigned int address, const unsigned int kind, const char * condition) {
+	char address_hexa[10];
+	sprintf(address_hexa, "$%08x", address);
+
+	if (BreakAddr_Command(address_hexa, false))
+		return GDBServer_generate_reply("OK");
+
+	return GDBServer_generate_reply("E01");
+}
+
+static char * GDBServer_remove_breakpoint(const unsigned int type, const unsigned int address, const unsigned int kind) {
+	char breakpoint_condition[64];
+	sprintf(breakpoint_condition, "pc = $%x", address);
+	int breackpoint_count = BreakCond_CpuBreakPointCount();
+	for (int i = 1; i <= breackpoint_count; ++i) {
+		bc_breakpoint_query_t query;
+		BreakCond_GetCpuBreakpointInfo(i, &query);
+
+		if(query.expression && strcmp(query.expression, breakpoint_condition) == 0) {
+			BreakCond_RemoveCpuBreakpoint(i);
+			return GDBServer_generate_reply("OK");
+		}
+	}
+
+	return GDBServer_generate_reply("E01"); // error
+}
+
+static char * GDBServer_step(void) {
+	// Step
+	DebugCpu_SetSteps(1);
+
+	// Restart
+	bRemoteBreakIsActive = false;
+
+	return GDBServer_ack_reply();
+}
+
+static char * GDBServer_step_to_address(const unsigned int address) {
+	// Step the memory address
+	M68000_SetPC(address); // ????
+
+	DebugCpu_SetSteps(0); // ????
+
+	// Restart
+	bRemoteBreakIsActive = false;
+
+	return GDBServer_generate_reply("S05");
+}
+
+static char * GDBServer_continue(void) {
+	// Continue
+	bRemoteBreakIsActive = false;
+
+	return GDBServer_ack_reply();
+}
+
+static char * GDBServer_continue_to_address(const unsigned int address) {
+	// Continue the memory address
+	M68000_SetPC(address); // ????
+	
+	bRemoteBreakIsActive = false; // ????
+
+	return GDBServer_ack_reply();
+}
+
+static char * GDBServer_break(void) {
+	// Only set a break request if we are running
+	if (!bRemoteBreakIsActive) {
+		bRemoteBreakRequest = true;
+	}
+	return GDBServer_ack_reply();
+}
+
+static char * hexaToASCII(const char * hexa) {
+    if (hexa == NULL)
+        return NULL;
+
+    size_t len = strlen(hexa);
+    if (len % 2 != 0) {
+        // Hex string must have an even number of characters
+        return NULL;
+    }
+
+    size_t ascii_len = len / 2;
+    char* ascii = (char*)malloc(ascii_len + 1); // +1 for null terminator
+    for (size_t i = 0; i < ascii_len; i++) {
+        unsigned int byte;
+        sscanf(hexa + (i * 2), "%2x", &byte); // Read two hex characters
+        ascii[i] = (char)byte;
+    }
+
+    ascii[ascii_len] = '\0'; // Null-terminate the ASCII string
+    return ascii;
+}
+
+static char * asciiToHexa(const char * ascii) {
+    if (ascii == NULL)
+        return NULL;
+
+    size_t len = strlen(ascii);
+    char* hexa = (char*)malloc((len * 2) + 1); // Each byte becomes 2 hex chars, +1 for null terminator
+    if (hexa == NULL) {
+        return NULL; // Memory allocation failed
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        sprintf(hexa + (i * 2), "%02x", (unsigned char)ascii[i]); // Convert each byte to 2 hex chars
+    }
+
+    hexa[len * 2] = '\0'; // Null-terminate the hexadecimal string
+    return hexa;
+}
+
+// Redirects stdout/stderr to given file a temporary file
+static int GDBServer_setstd(RemoteDebugState* state) {
+	// Create the output file
+	const char* tmp_filename = "hatari-tmp.txt";
+#ifdef __WINDOWS__
+	strncpy(state->consoleOutputFilename, filename, FILENAME_MAX);
+	state->consoleOutputFilename[FILENAME_MAX] = 0; /* ensure terminator */
+	//send_str(state, "OK");
+	return 0;
+#else
+	FILE* outpipe = fopen(tmp_filename, "w");
+	if (outpipe)
+	{
+		// Save this output so that we can pipe to it later
+		state->consoleOutputFile = outpipe;
+		//send_str(state, "OK");
+		return 0;
+	}
+#endif
+	return 1;
+}
+
+// "console <text>" pass command to debugui console input
+static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
+	char * command = hexaToASCII(commandInHexa);
+	if (!command)
+		return GDBServer_generate_reply("E01");
+
+	// Repoint all output to any supplied file
+#ifndef __WINDOWS__
+	const char* tmp_filename = "/tmp/hatari-tmp.txt";
+	FILE* file = fopen(tmp_filename, "rw");
+	if (file)
+	{
+		// Save this output so that we can pipe to it later
+		state->consoleOutputFile = file;
+	}
+#endif
+	RemoteDebug_OpenDebugOutput(state);
+	int cmdRet = DebugUI_ParseConsoleCommand(command);
+
+	/* handle a command that restarts execution */
+	if (cmdRet == DEBUGGER_END)
+		bRemoteBreakIsActive = false;
+
+	fflush(debugOutput);
+	RemoteDebug_CloseDebugOutput(state);
+	free(command);
+
+
+	char * result = NULL;
+
+#ifdef __WINDOWS__
+    FILE * file = fopen(state->consoleOutputFilename, "r");
+#endif
+    if (file) {
+		// Seek to the end to determine file size
+		fseek(file, 0, SEEK_END);
+		long file_size = ftell(file);
+		rewind(file);
+
+		// Allocate memory for the file content (+1 for null terminator)
+		char *buffer = (char *)malloc(file_size + 1);
+
+		// Read the file into the buffer
+		size_t read_size = fread(buffer, 1, file_size, file);
+		buffer[read_size] = '\0'; // Null-terminate the string
+
+		fclose(file);
+
+		result = asciiToHexa(buffer);
+		free(buffer);
+	}
+	// Empty the file
+#ifdef __WINDOWS__
+	file = fopen(state->consoleOutputFilename, "w");
+#else
+	file = fopen(tmp_filename, "w");
+#endif
+    if (file)
+		fclose(file);
+
+
+	if (!result)
+		return GDBServer_generate_reply("E01");
+
+	const int length = strlen(result);
+	char * output_reply = malloc(length + 2);
+	sprintf(output_reply, "O%s", result);
+	free(result);
+
+	char * reply = GDBServer_generate_reply(output_reply);
+	free(output_reply);
+	GDBServer_trace(LOG_DEBUG, "<- %s\n", reply);
+	send_str(state, reply);
+	free(reply);
+	flush_data(state);
+
+	return GDBServer_generate_reply("OK");
+// #else
+// 	char * command = hexaToASCII(commandInHexa);
+// 	if (!command)
+// 		return GDBServer_generate_reply("E01");
+
+// 	// Repoint all output to any supplied file
+
+// 	const char* tmp_filename = "/tmp/hatari-tmp.txt";
+// 	FILE* file = fopen(tmp_filename, "rw");
+// 	if (file)
+// 	{
+// 		// Save this output so that we can pipe to it later
+// 		state->consoleOutputFile = file;
+// 	}
+
+// 	RemoteDebug_OpenDebugOutput(state);
+// 	int cmdRet = DebugUI_ParseConsoleCommand(command);
+
+// 	/* handle a command that restarts execution */
+// 	if (cmdRet == DEBUGGER_END)
+// 		bRemoteBreakIsActive = false;
+
+// 	fflush(debugOutput);
+// 	RemoteDebug_CloseDebugOutput(state);
+// 	free(command);
+
+
+// 	char * result = NULL;
+
+//     //FILE * file = fopen(state->consoleOutputFilename, "r");
+//     if (file) {
+// 		// Seek to the end to determine file size
+// 		fseek(file, 0, SEEK_END);
+// 		long file_size = ftell(file);
+// 		rewind(file);
+
+// 		// Allocate memory for the file content (+1 for null terminator)
+// 		char *buffer = (char *)malloc(file_size + 1);
+
+// 		// Read the file into the buffer
+// 		size_t read_size = fread(buffer, 1, file_size, file);
+// 		buffer[read_size] = '\0'; // Null-terminate the string
+
+// 		fclose(file);
+
+// 		result = asciiToHexa(buffer);
+// 		free(buffer);
+// 	}
+// 	// Empty the file
+// 	//file = fopen(state->consoleOutputFilename, "w");
+// 	file = fopen(tmp_filename, "w");
+//     if (file)
+// 		fclose(file);
+
+
+// 	if (!result)
+// 		return GDBServer_generate_reply("E01");
+
+// 	const int length = strlen(result);
+// 	char * output_reply = malloc(length + 2);
+// 	sprintf(output_reply, "O%s", result);
+// 	free(result);
+
+// 	char * reply = GDBServer_generate_reply(output_reply);
+// 	free(output_reply);
+// 	GDBServer_trace(LOG_DEBUG, "<- %s\n", reply);
+// 	send_str(state, reply);
+// 	free(reply);
+// 	flush_data(state);
+
+// 	return GDBServer_generate_reply("OK");
+// #endif
+}
+
+/**
+ * Parse remote debug command and execute it.
+ * Command should return 0 if successful.
+ * Returns -1 if command not parsed
+ */
+static int GDBServer_Parse(const char *input_orig, RemoteDebugState* state) {
+	int retval = 1;
+	char packet[1024];
+	int remaining_length;
+	const char * input = input_orig;
+    while ((remaining_length = strlen(input)) > 0) {
+		//   let m;
+		if (input[0] == '+') {
+			// ack
+			GDBServer_trace(LOG_DEBUG, "-> %c\n", input[0]);
+			input++;
+		} else if (input[0] == '-') {
+			// ack
+			GDBServer_trace(LOG_DEBUG, "-> %c\n", input[0]);
+			input++;
+		} else if (input[0] == 3) {
+			// Ctrl+C (pause debug session)
+			GDBServer_trace(LOG_DEBUG, "-> 0x03 (Ctrl+C)\n");
+			char * reply = GDBServer_break();
+			send_str(state, reply);
+			free(reply);
+			reply = NULL;
+			flush_data(state);
+			input++;
+		} else if (remaining_length > 3 && input[0] == '$' && input[remaining_length - 3] == '#') {
+			GDBServer_trace(LOG_DEBUG, "-> %s\n", input);
+			int checksum = 0;
+			sscanf(input + 1, "%[^#]#%x", packet, &checksum);
+			const unsigned char expected = GDBServer_compute_checksum(packet);
+			if (checksum == expected) {
+				// packet can be modified here
+				char * reply = NULL;
+				int packet_length = strlen(packet);
+				if (strcmp(packet, "?") == 0) {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-_003f-packet
+					// Use stop reason SIGTRAP(5).
+					reply = GDBServer_generate_reply("S05");
+				} else if (strcmp(packet, "qAttached") == 0) {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/General-Query-Packets.html#index-qAttached-packet
+					reply = GDBServer_generate_reply("1"); // 1 = The remote server attached to an existing process. 
+				} else if (strcmp(packet, "g") == 0) { // Get all registers
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-g-packet
+					reply = GDBServer_read_registers(0);
+				} else if (packet[0] == 'G') {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-G-packet
+					reply = GDBServer_write_registers(packet + 1);
+				} else if (packet[0] == 'p') { // Get a specific register
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-p-packet
+					reply = GDBServer_read_register(strtoul(packet + 1, NULL, 16));
+				} else if (packet[0] == 'm') { // Get memory (m<addr>,<length>)
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-m-packet
+					char * m = strchr(packet, ',');
+					if (!m) {
+						reply = GDBServer_generate_reply("E01"); // error
+					} else {
+						*m = 0;
+						const unsigned int memory_address = strtoul(packet + 1, NULL, 16);
+						const unsigned int memory_length = strtoul(m + 1, NULL, 16);
+						reply = GDBServer_read_memory(memory_address, memory_length);
+					}
+				} else if (packet[0] == 'M') { // Set memory (M<addr>,<length>:XXXXXX...)
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-M-packet
+					char * memory_length_position = strchr(packet + 1, ',');
+					char * memory_data_position = memory_length_position != NULL ? strchr(memory_length_position, ':') : NULL;
+					if (!memory_length_position || !memory_data_position) {
+						reply = GDBServer_generate_reply("E01"); // error
+					} else {
+						*memory_length_position = 0;
+						const unsigned int memory_address = strtoul(packet + 1, NULL, 16);
+						const unsigned int memory_length = strtoul(memory_length_position + 1, NULL, 16);
+						if(memory_length * 2 != strlen(memory_data_position + 1))
+							reply = GDBServer_generate_reply("E01"); // error
+						else
+							reply = GDBServer_write_memory(memory_address, memory_length, memory_data_position + 1);
+					}
+				} else if (strcmp(packet, "vCont?") == 0) {
+					//reply = GDBServer_generate_reply(""); // "+$#00";
+					// reply = GDBServer_generate_reply("vCont;c;C;s;S;t;r");
+					reply = GDBServer_generate_reply("vCont;c;C;s;S;t");
+				} else if (strncmp(packet, "vCont;", strlen("vCont;")) == 0) {
+					//https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-vCont-packet
+					const char vContAction = packet[6];
+					if (vContAction == 'c' || vContAction == 'C') {
+						// continue
+						reply = GDBServer_continue();
+					} else if (vContAction == 's' || vContAction == 'S') {
+						// step
+						reply = GDBServer_step();
+					} else if (vContAction == 't') {
+						// stop
+						reply = GDBServer_break();
+					} else if (vContAction == 'r') {
+						// step range!
+						// TODO???
+						reply = GDBServer_generate_reply(""); // "+$#00";
+					} else {
+						reply = GDBServer_generate_reply(""); // "+$#00";
+					}
+				} else if(packet[0] == 'H') {
+					if (packet[1] == 'g') {
+						// getting registers for thread
+						int tid = strtoul(packet + 2, NULL, 16);
+						reply = GDBServer_read_registers(tid);
+					} else
+						reply = GDBServer_generate_reply("OK");
+				} else if(packet[0] == 'T') {
+					reply = GDBServer_generate_reply("OK");
+				} else if(packet[0] == 'D') { // detach
+					reply = GDBServer_generate_reply("OK");
+				} else if (packet[0] == 's') {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-s-packet
+					if(strlen(packet + 1) == 8) {
+						const unsigned int step_address = strtoul(packet + 1, NULL, 16);
+						reply = GDBServer_step_to_address(step_address);
+					} else
+						reply = GDBServer_step();
+				} else if (packet[0] == 'c') {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-c-packet
+					if(strlen(packet + 1) == 8) {
+						const unsigned int continue_address = strtoul(packet + 1, NULL, 16);
+						reply = GDBServer_continue_to_address(continue_address);
+					} else
+						reply = GDBServer_continue();
+				// } else if (strcmp(packet, "qSymbol::") == 0) {
+				// 	// https://sourceware.org/gdb/current/onlinedocs/gdb.html/General-Query-Packets.html#index-qAttached-packet
+				// 	reply = GDBServer_generate_reply(""); // "+$#00";
+				} else if (strcmp(packet, "qOffsets") == 0) {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/General-Query-Packets.html#index-qOffsets-packet
+					reply = GDBServer_section_offsets();
+				} else if ((packet[0] == 'z' || packet[0] == 'Z') && packet_length > 3 && packet[2] == ',') {
+					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-z-packet
+					// z type,addr,kind
+					// Z type,addr,kind
+					// type:
+					//   0 - software breakpoint
+					//   1 - hardware breakpoint
+					//   2 - write watchpoint
+					//   3 - read watchpoint
+					//   4 - access watchpoint
+					// addr: address
+					// kind: length of the memory region to be watched (for watchpoints)
+					// Returns OK or E01 (error)
+					char * breakpoint_kind_position = strchr(packet + 3, ',');
+					if (!breakpoint_kind_position) {
+						reply = GDBServer_generate_reply("E01"); // error
+					} else {
+						*breakpoint_kind_position = 0;
+						const char breakpoint_type = packet[1];
+						const unsigned int breakpoint_address = strtoul(packet + 3, NULL, 16);
+						char * breakpoint_condition_position = strchr(breakpoint_kind_position + 1, ';');
+						if (breakpoint_condition_position)
+							breakpoint_condition_position[0] = 0;
+						const unsigned int breakpoint_kind = strtoul(breakpoint_kind_position + 1, NULL, 16);
+						if (packet[0] == 'Z')
+							reply = GDBServer_add_breakpoint(breakpoint_type, breakpoint_address, breakpoint_kind, breakpoint_condition_position + 1);
+						else if (packet[0] == 'z')
+							reply = GDBServer_remove_breakpoint(breakpoint_type, breakpoint_address, breakpoint_kind);
+					}
+				} else if (strncmp(packet, "qRcmd,", strlen("qRcmd,")) == 0) {
+					// https://www.sourceware.org/gdb/current/onlinedocs/gdb.html/General-Query-Packets.html#index-qRcmd-packet
+					reply = GDBServer_console(packet + 6, state);
+				} else
+					reply = GDBServer_generate_reply(""); // "+$#00";
+				GDBServer_trace(LOG_DEBUG, "<- %s\n", reply);
+				send_str(state, reply);
+				free(reply);
+				reply = NULL;
+				flush_data(state);
+			} else {
+				GDBServer_trace(LOG_DEBUG, "Invalid checksum. Expected %X but received %X for packet %s", expected, checksum, packet);
+			}
+			input += remaining_length;
+		} else {
+			GDBServer_trace(LOG_DEBUG, "-> %s\n", input);
+			GDBServer_trace(LOG_DEBUG, "Unkown incoming message: %s\n", input);
+			// Ignore the rest of the data.
+			input += remaining_length;
+			break;
+		}
+    }
+
+	return retval;
+}
+
+/* Process any command data that has been read into the pending
+	command buffer, and execute them.
+*/
+static void GDBServer_ProcessBuffer(RemoteDebugState* state)
+{
+	int num_commands = 0;
+	char gdb_cmd[2048];
+	while (1)
+	{
+		size_t cmd_length = 0;
+		// Scan for \03 byte meanings Ctrl+C (interrupt debuggee)
+		char* ctrlCEndptr = memchr(state->input_buf.data, 3, state->input_buf.write_pos);
+		if (ctrlCEndptr) {
+			cmd_length = ctrlCEndptr + 1 - state->input_buf.data;
+			memcpy(gdb_cmd, state->input_buf.data, cmd_length);
+			gdb_cmd[cmd_length] = 0;
+		} else {
+			// Scan for a complete command by looking for the terminator
+			char* endptr = memchr(state->input_buf.data, '#', state->input_buf.write_pos);
+			if (!endptr)
+				break;
+
+			cmd_length = endptr + 3 - state->input_buf.data;
+			memcpy(gdb_cmd, state->input_buf.data, cmd_length);
+			gdb_cmd[cmd_length] = 0;
+		}
+
+		// Process this command
+		GDBServer_Parse(gdb_cmd, state);
+
+		RemoteDebugBuffer_RemoveStart(&state->input_buf, cmd_length);
+		++num_commands;
+	}
+	if (num_commands)
+		flush_data(state);
+}
 
 // -----------------------------------------------------------------------------
 #if HAVE_WINSOCK_SOCKETS
@@ -1517,7 +2212,10 @@ static void SetReuseAddr(int fd)
 #define RDB_CLOSE				close
 #endif
 
-static RemoteDebugState g_rdbState;
+static RemoteDebugState g_rdbState = { .protocol = PROTOCOL_HRDB, .port = RDB_PORT };
+#ifdef GDB_SERVER
+static RemoteDebugState g_gdbState = { .protocol = PROTOCOL_GDB, .port = GDB_PORT };
+#endif
 
 static void RemoteDebugState_Init(RemoteDebugState* state)
 {
@@ -1577,22 +2275,25 @@ static int RemoteDebugState_TryAccept(RemoteDebugState* state, bool blocking)
 	state->AcceptedFD = accept(state->SocketFD, NULL, NULL);
 	if (state->AcceptedFD != -1)
 	{
-		printf("Remote Debug connection accepted\n");
+		printf("Remote Debug connection accepted (port %d)\n", state->port);
 		// reset send buffer
 		state->sendBufferPos = 0;
-		// Send connected handshake, so client can
-		// drop any subsequent commands
-		send_str(state, "!connected");
-		send_sep(state);
-		send_hex(state, REMOTEDEBUG_PROTOCOL_ID);
-		send_term(state);
-		flush_data(state);
+		if (state->protocol == PROTOCOL_HRDB)
+		{
+			// Send connected handshake, so client can
+			// drop any subsequent commands
+			send_str(state, "!connected");
+			send_sep(state);
+			send_hex(state, REMOTEDEBUG_PROTOCOL_ID);
+			send_term(state);
+			flush_data(state);
 
-		// New connection, so do an initial report.
-		RemoteDebug_NotifyConfig(state);
-		RemoteDebug_NotifyState(state);
-		RemoteDebug_NotifySymbols(state);
-		flush_data(state);
+			// New connection, so do an initial report.
+			RemoteDebug_NotifyConfig(state);
+			RemoteDebug_NotifyState(state);
+			RemoteDebug_NotifySymbols(state);
+			flush_data(state);
+		}
 	}
 	return state->AcceptedFD;
 }
@@ -1683,12 +2384,17 @@ static void RemoteDebugState_UpdateAccepted(RemoteDebugState* state)
 		// Add to the resizeable buffer
 		RemoteDebugBuffer_Add(&state->input_buf, state->cmd_buf, bytes);
 		// Check for completed commands
-		RemoteDebug_ProcessBuffer(state);
+		if (state->protocol == PROTOCOL_HRDB)
+			RemoteDebug_ProcessBuffer(state);
+#ifdef GDB_SERVER
+		else if (state->protocol == PROTOCOL_GDB)
+			GDBServer_ProcessBuffer(state);
+#endif
 	}
 	else if (bytes == 0)
 	{
 		// This represents an orderly EOF, even in Winsock
-		printf("Remote Debug connection closed\n");
+		printf("Remote Debug connection closed (port %d)\n", state->port);
 		RDB_CLOSE(state->AcceptedFD);
 		state->AcceptedFD = -1;
 
@@ -1715,10 +2421,12 @@ static void RemoteDebugState_UpdateAccepted(RemoteDebugState* state)
 /* Update with a suitable message, when we are in the break loop */
 static void SetStatusbarMessage(const RemoteDebugState* state)
 {
-	if (state->AcceptedFD != -1)
+	if (state->protocol == PROTOCOL_HRDB && state->AcceptedFD != -1)
 		Statusbar_AddMessage("hrdb connected -- debugging", 100);
+	else if (state->protocol == PROTOCOL_GDB && state->AcceptedFD != -1)
+		Statusbar_AddMessage("gdb connected -- debugging", 100);
 	else
-		Statusbar_AddMessage("break -- waiting for hrdb", 100);
+		Statusbar_AddMessage("break -- waiting for hrdb or gdb", 100);
 	Statusbar_Update(sdlscrn, true);
 }
 
@@ -1733,50 +2441,82 @@ static void SetStatusbarMessage(const RemoteDebugState* state)
 	- main socket lost
 	- quit request from UI
 */
-static bool RemoteDebug_BreakLoop(void)
+static bool RemoteDebug_BreakLoop(debug_reason_t reason)
 {
-	RemoteDebugState* state;
-	state = &g_rdbState;
-
 	// This is set to true to prevent re-entrancy in RemoteDebug_Update()
 	bRemoteBreakIsActive = true;
 
-	if (state->AcceptedFD != -1)
+	if (g_rdbState.AcceptedFD != -1)
 	{
 		// Notify after state change happens
-		RemoteDebug_NotifyConfig(state);
-		RemoteDebug_NotifyState(state);
-		RemoteDebug_NotifyProfile(state);
-		flush_data(state);
+		RemoteDebug_NotifyConfig(&g_rdbState);
+		RemoteDebug_NotifyState(&g_rdbState);
+		RemoteDebug_NotifyProfile(&g_rdbState);
+		flush_data(&g_rdbState);
 	}
+#ifdef GDB_SERVER
+	if (g_gdbState.AcceptedFD != -1)
+	{
+		GDBServer_trace(LOG_DEBUG, "RemoteDebug_BreakLoop(%d 3:REASON_CPU_BREAKPOINT, 5:REASON_CPU_STEPS, 8: REASON_USER, etc...)\n", reason);
+		if(reason == REASON_CPU_BREAKPOINT
+		|| reason == REASON_CPU_STEPS
+		|| reason == REASON_USER
+		) {
+			char * reply = GDBServer_generate_reply("S05");
+			GDBServer_trace(LOG_DEBUG, "<- %s\n", reply);
+			send_str(&g_gdbState, reply);
+			flush_data(&g_gdbState);
+			free(reply);
+			reply = NULL;
+		}
+	}
+#endif
 
 	RemoteDebug_HardwareSync();
 
-	SetStatusbarMessage(state);
+	SetStatusbarMessage(&g_rdbState);
+	SetStatusbarMessage(&g_gdbState);
 
 	// Set the socket to blocking on the connection now, so we
 	// sleep until data is available.
-	SetNonBlocking(state->AcceptedFD, 0);
+#ifndef GDB_SERVER
+	SetNonBlocking(g_rdbState.AcceptedFD, 0);
+#else
+	SetNonBlocking(g_rdbState.AcceptedFD, 1);
+	SetNonBlocking(g_gdbState.AcceptedFD, 1);
+#endif
 
 	while (bRemoteBreakIsActive)
 	{
 		// Handle main exit states
-		if (state->SocketFD == -1)
+		if (g_rdbState.SocketFD == -1
+#ifdef GDB_SERVER
+		&& g_gdbState.SocketFD == -1
+#endif
+		)
 			break;
 
 		if (bQuitProgram)
 			break;
 
+		RemoteDebugState * state = &g_rdbState;
+
 		// If we don't have a connection yet, we need to get one
 		if (state->AcceptedFD == -1)
 		{
 			// Try to reconnect (with select())
+#ifndef GDB_SERVER
 			RemoteDebugState_TryAccept(state, true);
+#else
+			RemoteDebugState_TryAccept(state, false);
+#endif
 			if (state->AcceptedFD != -1)
 			{
+#ifndef GDB_SERVER
 				// Set the socket to blocking on the connection now, so we
 				// sleep until data is available.
 				SetNonBlocking(state->AcceptedFD, 0);
+#endif
 				SetStatusbarMessage(state);
 			}
 			else
@@ -1795,19 +2535,40 @@ static bool RemoteDebug_BreakLoop(void)
 				SetStatusbarMessage(state);
 			}
 		}
+
+#ifdef GDB_SERVER
+		state = &g_gdbState;
+
+		// If we don't have a connection yet, we need to get one
+		if (state->AcceptedFD == -1)
+		{
+			// Try to reconnect (with select())
+			RemoteDebugState_TryAccept(state, false);
+			if (state->AcceptedFD == -1)
+			{
+				// No connection so update events
+				Main_EventHandler(true);
+			}
+		}
+		else
+		{
+			// Already connected, check for messages or disconnection
+			RemoteDebugState_UpdateAccepted(state);
+		}
+#endif
 	}
 	bRemoteBreakIsActive = false;
 	// Clear any break request that might have been set
 	bRemoteBreakRequest = false;
 
 	// Switch back to non-blocking for the update loop
-	if (state->AcceptedFD != -1)
+	if (g_rdbState.AcceptedFD != -1)
 	{
-		RemoteDebug_NotifyConfig(state);
-		RemoteDebug_NotifyState(state);
-		flush_data(state);
+		RemoteDebug_NotifyConfig(&g_rdbState);
+		RemoteDebug_NotifyState(&g_rdbState);
+		flush_data(&g_rdbState);
 
-		SetNonBlocking(state->AcceptedFD, 1);
+		SetNonBlocking(g_rdbState.AcceptedFD, 1);
 	}
 
 	// TODO: this return code no longer used
@@ -1838,11 +2599,11 @@ static int RemoteDebugState_InitServer(RemoteDebugState* state)
 
 	memset(&sa, 0, sizeof sa);
 	sa.sin_family = AF_INET;
-	sa.sin_port = htons(RDB_PORT);
+	sa.sin_port = htons(state->port);
 	sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
 	if (bind(state->SocketFD,(struct sockaddr *)&sa, sizeof sa) == -1) {
-		fprintf(stderr, "Failed to bind socket (bind() error: %d)\n", GET_SOCKET_ERROR);
+		fprintf(stderr, "Failed to bind socket with port %d (bind() error: %d)\n", state->port, GET_SOCKET_ERROR);
 #if HAVE_UNIX_DOMAIN_SOCKETS
 		if (GET_SOCKET_ERROR == EADDRINUSE) {
 			fprintf(stderr, "This error might be caused by another Hatari instance "
@@ -1855,14 +2616,18 @@ static int RemoteDebugState_InitServer(RemoteDebugState* state)
 	}
   
 	if (listen(state->SocketFD, 1) == -1) {
-		fprintf(stderr, "Failed to listen() on socket\n");
+		fprintf(stderr, "Failed to listen() on socket (port %d)\n", state->port);
 		RDB_CLOSE(state->SocketFD);
 		state->SocketFD =-1;
 		return 1;
 	}
 
 	// Socket is now in a listening state and could accept 
-	printf("Remote Debug Listening on port %d, protocol %x\n", RDB_PORT, REMOTEDEBUG_PROTOCOL_ID);
+	printf("Remote Debug Listening on port %d", state->port);
+	if (state->protocol == PROTOCOL_HRDB)
+		printf(", protocol %x\n", REMOTEDEBUG_PROTOCOL_ID);
+	else if (state->protocol == PROTOCOL_GDB)
+		printf(" for GDB\n");
 	return 0;
 }
 
@@ -1902,12 +2667,17 @@ static void RemoteDebugState_Update(RemoteDebugState* state)
 			// Add to the resizeable buffer
 			RemoteDebugBuffer_Add(&state->input_buf, state->cmd_buf, bytes);
 			// Check for completed commands
-			RemoteDebug_ProcessBuffer(state);
+			if (state->protocol == PROTOCOL_HRDB)
+				RemoteDebug_ProcessBuffer(state);
+#ifdef GDB_SERVER
+			else if (state->protocol == PROTOCOL_GDB)
+				GDBServer_ProcessBuffer(state);
+#endif
 		}
 		else if (bytes == 0)
 		{
 			// This represents an orderly EOF
-			printf("Remote Debug connection closed\n");
+			printf("Remote Debug connection closed (port %d)\n", state->port);
 			RDB_CLOSE(state->AcceptedFD);
 			state->AcceptedFD = -1;
 			return;
@@ -1929,6 +2699,10 @@ void RemoteDebug_Init(void)
 {
 	printf("Starting remote debug\n");
 	RemoteDebugState_Init(&g_rdbState);
+#ifdef GDB_SERVER
+	RemoteDebugState_Init(&g_gdbState);
+	GDBServer_setstd(&g_gdbState);
+#endif
 	
 #if HAVE_WINSOCK_SOCKETS
 	WORD wVersionRequested;
@@ -1946,7 +2720,11 @@ void RemoteDebug_Init(void)
 	}
 #endif
 
-	if (RemoteDebugState_InitServer(&g_rdbState) == 0)
+	if (RemoteDebugState_InitServer(&g_rdbState) == 0
+#ifdef GDB_SERVER
+	&& RemoteDebugState_InitServer(&g_gdbState) == 0
+#endif
+	)
 	{
 		// Socket created, so use our break loop
 		DebugUI_RegisterRemoteDebug(RemoteDebug_BreakLoop);
@@ -1961,6 +2739,9 @@ void RemoteDebug_UnInit()
 	DebugUI_RegisterRemoteDebug(NULL);
 
 	RemoteDebugState_UnInit(&g_rdbState);
+#ifdef GDB_SERVER
+	RemoteDebugState_UnInit(&g_gdbState);
+#endif
 }
 
 bool RemoteDebug_Update(void)
@@ -1971,6 +2752,9 @@ bool RemoteDebug_Update(void)
 	if (!bRemoteBreakIsActive)
 	{
 		RemoteDebugState_Update(&g_rdbState);
+#ifdef GDB_SERVER
+		RemoteDebugState_Update(&g_gdbState);
+#endif
 	}
 	return bRemoteBreakIsActive;
 }

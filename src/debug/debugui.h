@@ -31,7 +31,7 @@ typedef enum {
 } debug_reason_t;
 
 /* Callback type to register if remote debugging is enabled */
-typedef bool (*DebugUI_ProcessRemoteCommands)(void);
+typedef bool (*DebugUI_ProcessRemoteCommands)(debug_reason_t reason);
 
 extern void DebugUI_Init(void);
 extern void DebugUI(debug_reason_t reason);

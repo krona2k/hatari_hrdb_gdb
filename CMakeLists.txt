@@ -317,7 +317,7 @@ endif(ENABLE_WERROR)
 
 # Building Hatari w/o optimization is no fun...
 IF (CMAKE_BUILD_TYPE STREQUAL "Debug")
-	set(CMAKE_C_FLAGS "-O ${CMAKE_C_FLAGS}")
+	set(CMAKE_C_FLAGS "-g ${CMAKE_C_FLAGS}")
 ENDIF (CMAKE_BUILD_TYPE STREQUAL "Debug")
 
 # Always add the Large File Support flags in case they are supported
