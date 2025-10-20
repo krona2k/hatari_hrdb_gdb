@@ -9,7 +9,7 @@
  */
 
 #define GDB_SERVER
-#define GDB_SERVER_TRACE
+// #define GDB_SERVER_TRACE
 
 #include "remotedebug.h"
 
@@ -1782,7 +1782,7 @@ static int GDBServer_setstd(RemoteDebugState* state) {
 	// Create the output file
 	const char* tmp_filename = "hatari-tmp.txt";
 #ifdef __WINDOWS__
-	strncpy(state->consoleOutputFilename, filename, FILENAME_MAX);
+	strncpy(state->consoleOutputFilename, tmp_filename, FILENAME_MAX);
 	state->consoleOutputFilename[FILENAME_MAX] = 0; /* ensure terminator */
 	//send_str(state, "OK");
 	return 0;
@@ -1824,7 +1824,6 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 
 	fflush(debugOutput);
 	RemoteDebug_CloseDebugOutput(state);
-	fclose(tmp_file);
 	free(command);
 
 
