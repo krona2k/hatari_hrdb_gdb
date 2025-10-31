@@ -1526,10 +1526,14 @@ static unsigned char GDBServer_compute_checksum(const char * packet) {
 }
 
 static char * GDBServer_generate_reply(const char * packet) {
-	int length = strlen(packet);
-	char * reply = malloc(length + 6 + 16); // +6 for "+$" + "#" + 2 checksum + terminator
 	unsigned char checksum = GDBServer_compute_checksum(packet);
-	sprintf(reply, "+$%s#%02x", packet, checksum);
+	int length = strlen(packet);
+	int buffer_length = length + 6 + 16; // +6 for "+$" + "#" + 2 checksum + terminator
+	char * reply = malloc(buffer_length);
+	if (snprintf(reply, buffer_length, "+$%s#%02x", packet, checksum) < 0) {
+		free(reply);
+		return GDBServer_generate_reply("E01");
+	}
 	return reply;
 }
 
@@ -1653,11 +1657,8 @@ static char * GDBServer_section_offsets(void) {
 
 	uint32_t text = DebugInfo_GetTEXT();
 	uint32_t data = DebugInfo_GetDATA();
-	uint32_t bss = DebugInfo_GetBSS();
 
-	//‘Text=xxx;Data=yyy[;Bss=zzz]’
-	// 5    +8     +6+8  +5   +8  = 40
-	sprintf(reply, "Text=%08x;Data=%08x;Bss=%08x", text, data, bss); 
+	sprintf(reply, "TextSeg=%08x;DataSeg=%08x", text, data); 
 
 	char * result = GDBServer_generate_reply(reply);
 	free(reply);
@@ -1872,84 +1873,14 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 
 	char * reply = GDBServer_generate_reply(output_reply);
 	free(output_reply);
+#ifdef GDB_SERVER_TRACE
 	GDBServer_trace(LOG_DEBUG, "<- %s\n", reply);
+#endif
 	send_str(state, reply);
 	free(reply);
 	flush_data(state);
 
 	return GDBServer_generate_reply("OK");
-// #else
-// 	char * command = hexaToASCII(commandInHexa);
-// 	if (!command)
-// 		return GDBServer_generate_reply("E01");
-
-// 	// Repoint all output to any supplied file
-
-// 	const char* tmp_filename = "/tmp/hatari-tmp.txt";
-// 	FILE* file = fopen(tmp_filename, "rw");
-// 	if (file)
-// 	{
-// 		// Save this output so that we can pipe to it later
-// 		state->consoleOutputFile = file;
-// 	}
-
-// 	RemoteDebug_OpenDebugOutput(state);
-// 	int cmdRet = DebugUI_ParseConsoleCommand(command);
-
-// 	/* handle a command that restarts execution */
-// 	if (cmdRet == DEBUGGER_END)
-// 		bRemoteBreakIsActive = false;
-
-// 	fflush(debugOutput);
-// 	RemoteDebug_CloseDebugOutput(state);
-// 	free(command);
-
-
-// 	char * result = NULL;
-
-//     //FILE * file = fopen(state->consoleOutputFilename, "r");
-//     if (file) {
-// 		// Seek to the end to determine file size
-// 		fseek(file, 0, SEEK_END);
-// 		long file_size = ftell(file);
-// 		rewind(file);
-
-// 		// Allocate memory for the file content (+1 for null terminator)
-// 		char *buffer = (char *)malloc(file_size + 1);
-
-// 		// Read the file into the buffer
-// 		size_t read_size = fread(buffer, 1, file_size, file);
-// 		buffer[read_size] = '\0'; // Null-terminate the string
-
-// 		fclose(file);
-
-// 		result = asciiToHexa(buffer);
-// 		free(buffer);
-// 	}
-// 	// Empty the file
-// 	//file = fopen(state->consoleOutputFilename, "w");
-// 	file = fopen(tmp_filename, "w");
-//     if (file)
-// 		fclose(file);
-
-
-// 	if (!result)
-// 		return GDBServer_generate_reply("E01");
-
-// 	const int length = strlen(result);
-// 	char * output_reply = malloc(length + 2);
-// 	sprintf(output_reply, "O%s", result);
-// 	free(result);
-
-// 	char * reply = GDBServer_generate_reply(output_reply);
-// 	free(output_reply);
-// 	GDBServer_trace(LOG_DEBUG, "<- %s\n", reply);
-// 	send_str(state, reply);
-// 	free(reply);
-// 	flush_data(state);
-
-// 	return GDBServer_generate_reply("OK");
-// #endif
 }
 
 /**
@@ -2471,7 +2402,8 @@ static bool RemoteDebug_BreakLoop(debug_reason_t reason)
 			free(reply);
 			reply = NULL;
 		}
-	}
+	} else
+		fflush(stderr);
 #endif
 
 	RemoteDebug_HardwareSync();
