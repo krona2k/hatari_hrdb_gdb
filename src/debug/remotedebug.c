@@ -59,6 +59,7 @@
 #include "reset.h"
 
 #include "debugInfo.h"
+#include "file.h"
 
 // TCP port for remote debugger access
 #define RDB_PORT                   (56001)
@@ -1806,61 +1807,72 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 	if (!command)
 		return GDBServer_generate_reply("E01");
 
-	// Repoint all output to any supplied file
-#ifndef __WINDOWS__
-	const char* tmp_filename = "/tmp/hatari-tmp.txt";
-	FILE* tmp_file = fopen(tmp_filename, "w");
-	if (tmp_file)
-	{
-		// Save this output so that we can pipe to it later
-		state->consoleOutputFile = tmp_file;
+	char *tmpname = NULL;
+	FILE *tmp_file = File_OpenTempFile(&tmpname);
+	if (!tmp_file) {
+		fprintf(stderr, "Opening temporary file failed\n");
+		free(command);
+		return GDBServer_generate_reply("E01");
 	}
-#endif
-	RemoteDebug_OpenDebugOutput(state);
+
+	// Flush before any redirection.
+	fflush(stdout);
+	fflush(stderr);
+
+	// Save the original file descriptors using dup.
+	int saved_stdout_fd = dup(fileno(stdout));
+	int saved_stderr_fd = dup(fileno(stderr));
+
+	// Redirect stdout/stderr to tmp_file.
+	if (dup2(fileno(tmp_file), fileno(stdout)) == -1) {
+		fprintf(stderr, "dup2 stdout failed: %s\n", strerror(errno));
+	}
+	if (dup2(fileno(tmp_file), fileno(stderr)) == -1) {
+		fprintf(stderr, "dup2 stderr failed: %s\n", strerror(errno));
+	}
+
 	int cmdRet = DebugUI_ParseConsoleCommand(command);
 
-	/* handle a command that restarts execution */
+	// handle a command that restarts execution.
 	if (cmdRet == DEBUGGER_END)
 		bRemoteBreakIsActive = false;
 
-	fflush(debugOutput);
-	RemoteDebug_CloseDebugOutput(state);
-	free(command);
+	// Flush and restore stdout/stderr.
+	fflush(stdout);
+	fflush(stderr);
+	if (saved_stdout_fd != -1) {
+		dup2(saved_stdout_fd, fileno(stdout));
+		close(saved_stdout_fd);
+	}
+	if (saved_stderr_fd != -1) {
+		dup2(saved_stderr_fd, fileno(stderr));
+		close(saved_stderr_fd);
+	}
 
+	free(command);
 
 	char * result = NULL;
 
-#ifdef __WINDOWS__
-    FILE * file = fopen(state->consoleOutputFilename, "r");
-#else
-	FILE * file = fopen(tmp_filename, "r");
-#endif
-    if (file) {
-		// Seek to the end to determine file size
-		fseek(file, 0, SEEK_END);
-		long file_size = ftell(file);
-		rewind(file);
+	long file_size = ftell(tmp_file);
+	rewind(tmp_file);
 
-		// Allocate memory for the file content (+1 for null terminator)
-		char *buffer = (char *)malloc(file_size + 1);
+	// Allocate memory for the file content (+1 for null terminator)
+	char * buffer = (char *)malloc(file_size + 1);
 
-		// Read the file into the buffer
-		size_t read_size = fread(buffer, 1, file_size, file);
-		buffer[read_size] = '\0'; // Null-terminate the string
+	// Read the file into the buffer
+	size_t read_size = fread(buffer, 1, file_size, tmp_file);
+	buffer[read_size] = '\0'; // Null-terminate the string
 
-		fclose(file);
-
-		result = asciiToHexa(buffer);
-		free(buffer);
+	fclose(tmp_file);
+	if (tmpname) {
+		// If File_OpenTempFile provided a filename on Windows, remove it.
+		remove(tmpname);
+		tmpname = NULL;
 	}
-	// Empty the file
-#ifdef __WINDOWS__
-	file = fopen(state->consoleOutputFilename, "w");
-#else
-	file = fopen(tmp_filename, "w");
-#endif
-    if (file)
-		fclose(file);
+
+	result = asciiToHexa(buffer);
+	free(buffer);
+
 
 
 	if (!result)
@@ -1880,7 +1892,7 @@ static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 	free(reply);
 	flush_data(state);
 
-	return GDBServer_generate_reply("OK");
+	return GDBServer_generate_reply("OK"); // Needed to indicate end of processing
 }
 
 /**
