@@ -1779,28 +1779,6 @@ static char * asciiToHexa(const char * ascii) {
     return hexa;
 }
 
-// Redirects stdout/stderr to given file a temporary file
-static int GDBServer_setstd(RemoteDebugState* state) {
-	// Create the output file
-	const char* tmp_filename = "hatari-tmp.txt";
-#ifdef __WINDOWS__
-	strncpy(state->consoleOutputFilename, tmp_filename, FILENAME_MAX);
-	state->consoleOutputFilename[FILENAME_MAX] = 0; /* ensure terminator */
-	//send_str(state, "OK");
-	return 0;
-#else
-	FILE* outpipe = fopen(tmp_filename, "w");
-	if (outpipe)
-	{
-		// Save this output so that we can pipe to it later
-		state->consoleOutputFile = outpipe;
-		//send_str(state, "OK");
-		return 0;
-	}
-#endif
-	return 1;
-}
-
 // "console <text>" pass command to debugui console input
 static char * GDBServer_console(char * commandInHexa, RemoteDebugState* state) {
 	char * command = hexaToASCII(commandInHexa);
@@ -2647,7 +2625,6 @@ void RemoteDebug_Init(void)
 	RemoteDebugState_Init(&g_rdbState);
 #ifdef GDB_SERVER
 	RemoteDebugState_Init(&g_gdbState);
-	GDBServer_setstd(&g_gdbState);
 #endif
 	
 #if HAVE_WINSOCK_SOCKETS
