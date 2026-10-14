@@ -1,0 +1,91 @@
+name: Build Hatari on Windows
+
+on:
+  push:
+    branches:
+    - main
+    - test
+    tags:
+    - v*
+
+jobs:
+
+  cygwin:
+    runs-on: windows-2022
+    steps:
+    - name: Setup git config
+      run: |
+        git config --system core.autocrlf false
+        git config --system core.eol lf
+    - uses: actions/checkout@v6
+    - uses: cygwin/cygwin-install-action@v6
+      with:
+        packages: |
+          cmake
+          gcc-core
+          pkg-config
+          make
+          libarchive
+          libarchive-devel
+          libpng
+          libpng-devel
+          libSDL3
+          libSDL3-devel
+          zlib
+          zlib-devel
+    - name: Compile Hatari
+      shell: C:\cygwin\bin\bash.exe -eo pipefail -o igncr '{0}'
+      run: |
+        CFLAGS='-Werror -Wno-error=char-subscripts' \
+         cmake -DCMAKE_POLICY_DEFAULT_CMP0109=NEW -G 'Unix Makefiles' .
+        /usr/bin/make -j4
+    - name: Test Hatari
+      shell: C:\cygwin\bin\bash.exe -eo pipefail -o igncr '{0}'
+      run: |
+        ctest -j4 --output-on-failure
+
+  msys2:
+    runs-on: windows-latest
+    env:
+      MSYS: winsymlinks:nativestrict
+      MSYSTEM: UCRT64
+      CHERE_INVOKING: 1
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install libraries
+      run: |
+        choco install -y --no-progress msys2
+        C:\tools\msys64\usr\bin\bash -lc "pacman --noconfirm -S --needed \
+          make pkg-config diffutils \
+          mingw-w64-ucrt-x86_64-cmake \
+          mingw-w64-ucrt-x86_64-gcc \
+          mingw-w64-ucrt-x86_64-sdl3 \
+          mingw-w64-ucrt-x86_64-libpng \
+          mingw-w64-ucrt-x86_64-portmidi \
+          mingw-w64-ucrt-x86_64-libarchive"
+    - name: Compile Hatari
+      run: |
+        C:\tools\msys64\usr\bin\bash -lc "cmake -G 'MSYS Makefiles' ."
+        C:\tools\msys64\usr\bin\bash -lc "make -j4"
+    - name: Testing
+      run: |
+        C:\tools\msys64\usr\bin\bash -lc "ctest -j4 --output-on-failure"
+
+  visualstudio:
+    runs-on: windows-2025-vs2026
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install libraries
+      run: |
+        curl -LO "https://github.com/libsdl-org/SDL/releases/download/release-2.32.2/SDL2-devel-2.32.2-VC.zip"
+        powershell -command "Expand-Archive -Force 'SDL2-devel-2.32.2-VC.zip' '.'"
+        curl -O https://raw.githubusercontent.com/barrysteyn/scrypt-windows/master/win/include/unistd.h
+        curl -O https://raw.githubusercontent.com/tronkko/dirent/master/include/dirent.h
+        echo // > getopt.h
+    - name: Compile Hatari
+      run: |
+        cmake -G "Visual Studio 18 2026" -A X64 -DCMAKE_BUILD_TYPE="Release" -DSDL2_DIR:PATH=SDL2-2.32.2\cmake .
+        cmake --build . --verbose --target ALL_BUILD --config Release -j4
+    - name: Test Hatari
+      run: |
+        ctest -C Release

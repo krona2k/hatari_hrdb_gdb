@@ -9,14 +9,16 @@
 const char HDC_fileid[] = "Hatari hdc.c";
 
 #include <errno.h>
-#include <SDL_endian.h>
 
 #include "main.h"
 #include "configuration.h"
 #include "debugui.h"
+#include "endianswap.h"
 #include "file.h"
 #include "fdc.h"
 #include "hdc.h"
+#include "cycles.h"
+#include "cycInt.h"
 #include "ioMem.h"
 #include "log.h"
 #include "m68000.h"
@@ -29,7 +31,7 @@ const char HDC_fileid[] = "Hatari hdc.c";
 
 
 /*
-  ACSI emulation: 
+  ACSI emulation:
   ACSI commands are six byte-packets sent to the
   hard drive controller (which is on the HD unit, not in the ST)
 
@@ -44,7 +46,7 @@ const char HDC_fileid[] = "Hatari hdc.c";
   The ACSI command set is a subset of the SCSI standard.
   (for details, see the X3T9.2 SCSI draft documents
   from 1985, for an example of writing ACSI commands,
-  see the TOS DMA boot code) 
+  see the TOS DMA boot code)
 */
 
 // #define DISALLOW_HDC_WRITE
@@ -73,6 +75,11 @@ static unsigned char inquiry_bytes[] =
 	'H','a','r','d','d','i','s','k',    /* Product ID 2 */
 	'0','1','8','0',                    /* Revision */
 };
+
+
+/* Delay before setting IRQ after a transfer is made with Acsi_DmaTransfer() */
+#define	ACSI_TRANSFER_MIN_CYCLES	1000			/* in CPU cycles */
+
 
 
 /*---------------------------------------------------------------------*/
@@ -230,8 +237,12 @@ static void HDC_Cmd_Inquiry(SCSI_CTRLR *ctr)
 	 * Peripheral Device Type according to the SCSI standard */
 	buf[0] = HDC_GetLUN(ctr) == 0 ? 0 : 0x7F;
 
+	/* For SCSI-2 and newer, the response data format is SCSI-2 */
 	buf[2] = dev->scsi_version;
-	buf[4] = count - 5;
+	if (dev->scsi_version >= 2)
+	{
+		buf[3] = 0x02;
+	}
 
 	ctr->status = HD_STATUS_OK;
 
@@ -348,19 +359,44 @@ static void HDC_CmdModeSense0x00(SCSI_DEV *dev, SCSI_CTRLR *ctr, uint8_t *buf)
 }
 
 
+/* Mode pages 3 and 4 describe one geometry: 128 heads x 32 sectors,
+ * a 4096-block cylinder. */
+#define HDC_GEOM_HEADS		128
+#define HDC_GEOM_SECTORS	32
+#define HDC_GEOM_CYLSIZE	(HDC_GEOM_HEADS * HDC_GEOM_SECTORS)
+
+/**
+ * Mode sense - Format device page.
+ */
+static void HDC_CmdModeSense0x03(SCSI_DEV *dev, SCSI_CTRLR *ctr, uint8_t *buf)
+{
+	memset(buf, 0, 24);
+	buf[0] = 3;
+	buf[1] = 22;
+	buf[3] = HDC_GEOM_HEADS;           // Tracks per zone, low
+	buf[10] = HDC_GEOM_SECTORS >> 8;   // Sectors per track
+	buf[11] = HDC_GEOM_SECTORS & 0xff;
+	buf[12] = dev->blockSize >> 8;     // Data bytes per physical sector
+	buf[13] = dev->blockSize & 0xff;
+	buf[15] = 1;     // Interleave
+	buf[20] = 0x40;  // Hard sectored
+}
+
 /**
  * Mode sense - Rigid disk geometry page (requested by ASV).
  */
 static void HDC_CmdModeSense0x04(SCSI_DEV *dev, SCSI_CTRLR *ctr, uint8_t *buf)
 {
+	uint32_t cyls = (dev->hdSize + HDC_GEOM_CYLSIZE - 1) / HDC_GEOM_CYLSIZE;
+
 	buf[0] = 4;
 	buf[1] = 22;
 
-	buf[2] = dev->hdSize >> 23;  // Number of cylinders, high
-	buf[3] = dev->hdSize >> 15;  // Number of cylinders, med
-	buf[4] = dev->hdSize >> 7;   // Number of cylinders, low
+	buf[2] = cyls >> 16;  // Number of cylinders, high
+	buf[3] = cyls >> 8;   // Number of cylinders, med
+	buf[4] = cyls;        // Number of cylinders, low
 
-	buf[5] = 128;    // Number of heads
+	buf[5] = HDC_GEOM_HEADS;    // Number of heads
 
 	buf[6] = 0;
 	buf[7] = 0;
@@ -417,20 +453,30 @@ static void HDC_Cmd_ModeSense(SCSI_CTRLR *ctr)
 		HDC_CmdModeSense0x00(dev, ctr, buf);
 		break;
 
+	 case 0x03:
+		buf = HDC_PrepRespBuf(ctr, 28);
+		HDC_CmdModeSense0x03(dev, ctr, buf + 4);
+		buf[0] = 27;
+		buf[1] = 0;
+		buf[2] = 0;
+		buf[3] = 0;
+		break;
+
 	 case 0x04:
 		buf = HDC_PrepRespBuf(ctr, 28);
 		HDC_CmdModeSense0x04(dev, ctr, buf + 4);
-		buf[0] = 24;
+		buf[0] = 27;
 		buf[1] = 0;
 		buf[2] = 0;
 		buf[3] = 0;
 		break;
 
 	 case 0x3f:
-		buf = HDC_PrepRespBuf(ctr, 44);
-		HDC_CmdModeSense0x04(dev, ctr, buf + 4);
-		HDC_CmdModeSense0x00(dev, ctr, buf + 28);
-		buf[0] = 43;
+		buf = HDC_PrepRespBuf(ctr, 68);
+		HDC_CmdModeSense0x03(dev, ctr, buf + 4);
+		HDC_CmdModeSense0x04(dev, ctr, buf + 28);
+		HDC_CmdModeSense0x00(dev, ctr, buf + 52);
+		buf[0] = 67;
 		buf[1] = 0;
 		buf[2] = 0;
 		buf[3] = 0;
@@ -788,8 +834,8 @@ int HDC_PartitionCount(FILE *fp, const uint64_t tracelevel, int *pIsByteSwapped)
 		{
 			boot = pinfo[0];
 			ptype = pinfo[4];
-			start = SDL_SwapLE32(*(uint32_t*)(pinfo+8));
-			sectors = SDL_SwapLE32(*(uint32_t*)(pinfo+12));
+			start = le_swap32(*(uint32_t*)(pinfo+8));
+			sectors = le_swap32(*(uint32_t*)(pinfo+12));
 			total += sectors;
 			LOG_TRACE_DIRECT_LEVEL(tracelevel,
 				"- Partition %d: type=0x%02x, start=0x%08x, size=%.1f MB %s%s\n",
@@ -936,6 +982,21 @@ int HDC_InitDevice(const char *hdtype, SCSI_DEV *dev, CNF_SCSIDEV *conf)
 	return 0;
 }
 
+/*---------------------------------------------------------------------*/
+/**
+ * HDC_UnInitDevice - close image file
+ */
+void HDC_UnInitDevice(SCSI_DEV *dev)
+{
+	if (dev->enabled)
+	{
+		File_UnLock(dev->image_file);
+		fclose(dev->image_file);
+		dev->image_file = NULL;
+		dev->enabled = false;
+	}
+}
+
 /**
  * Open the disk image files, set partitions.
  */
@@ -984,12 +1045,7 @@ void HDC_UnInit(void)
 
 	for (i = 0; bAcsiEmuOn && i < MAX_ACSI_DEVS; i++)
 	{
-		if (!AcsiBus.devs[i].enabled)
-			continue;
-		File_UnLock(AcsiBus.devs[i].image_file);
-		fclose(AcsiBus.devs[i].image_file);
-		AcsiBus.devs[i].image_file = NULL;
-		AcsiBus.devs[i].enabled = false;
+		HDC_UnInitDevice(&AcsiBus.devs[i]);
 	}
 	free(AcsiBus.buffer);
 	AcsiBus.buffer = NULL;
@@ -1138,7 +1194,13 @@ static void Acsi_DmaTransfer(void)
 	AcsiBus.data_len = 0;
 
 	FDC_SetDMAStatus(AcsiBus.bDmaError);	/* Mark DMA error */
-	FDC_SetIRQ(FDC_IRQ_SOURCE_HDC);
+
+	/* Although data transfer is made instantly above, some programsexpect the transfer to take */
+	/* a minimum delay before setting Hdc's IRQ (eg "Idris OS" in ACSI mode) */
+	/* For now we simulate this with a timer and a fixed delay, but this should be measured */
+	/* on real HW (depending on the read/write operation and the size of the transfer) */
+	FDC_ClearHdcIRQ();
+	CycInt_AddRelativeInterrupt(ACSI_TRANSFER_MIN_CYCLES, INT_CPU_CYCLE, INTERRUPT_HDC_ACSI);
 
 	/* For the MegaSTE, using the HDC DMA will flush the external cache */
 	if ( ConfigureParams.System.nMachineType == MACHINE_MEGA_STE )
@@ -1224,4 +1286,12 @@ void HDC_DmaTransfer(void)
 		Ncr5380_DmaTransfer_Falcon();
 	else if (bAcsiEmuOn)
 		Acsi_DmaTransfer();
+}
+
+
+
+void HDC_ACSI_InterruptHandler_Update ( void )
+{
+	CycInt_AcknowledgeInterrupt();
+	FDC_SetIRQ(FDC_IRQ_SOURCE_HDC);
 }

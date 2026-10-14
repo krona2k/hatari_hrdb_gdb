@@ -95,6 +95,7 @@ TT :
   ACIA MC6850	IN = 500 kHz (CLKX5)
   IKBD HD6301	IN = 1 MHZ (local clock)
   SCC Z85C30	IN = 8 MHz (CLK8)
+  MC146818A	IN = 32.768 kHz
 
 
 FALCON :
@@ -117,6 +118,7 @@ FALCON :
   ACIA MC6850	IN = 500 kHz (KHZ500)
   IKBD HD6301	IN = 1 MHZ (local clock)
   SCC Z85C30	IN = 8 MHz (CLK8)
+  MC146818A	IN = 32.768 kHz (local clock)  (uses a DS1287)
 
 */
 
@@ -151,8 +153,8 @@ const char ClocksTimings_fileid[] = "Hatari clocks_timings.c";
 #define ATARI_MEGA_STE_NTSC_MCLK	32215905			/* CPU_Freq = 16.1079525 MHz */
 #define ATARI_MEGA_STE_EXT_OSC		16021226			/* OSC U408 */
 
-#define ATARI_TT_PAL_MCLK		32084988			/* CPU_Freq = 32.084988 MHz */
-#define ATARI_TT_NTSC_MCLK		32215905			/* CPU_Freq = 32.215905 MHz */
+#define ATARI_TT_MCLK			32215905			/* CPU_Freq = 32.215905 MHz */
+									/* There's no PAL/NTSC variant, only VGA */
 
 #define ATARI_FALCON_PAL_MCLK		32084988			/* CPU_Freq = 16.042494 MHz */
 #define ATARI_FALCON_NTSC_MCLK		32215905			/* CPU_Freq = 16.1079525 MHz */
@@ -161,6 +163,7 @@ const char ClocksTimings_fileid[] = "Hatari clocks_timings.c";
 #define ATARI_MFP_XTAL			2457600				/* external clock for the MFP */
 #define ATARI_IKBD_CLK			1000000				/* clock of the HD6301 ikbd cpu */
 
+#define ATARI_MC146818A_CLK		32768
 
 
 CLOCKS_STRUCT	MachineClocks;
@@ -285,7 +288,7 @@ void	ClocksTimings_InitMachine ( MACHINETYPE MachineType )
 	{
 		int	CLK32, CLK16, CLK8, FCCLK, CLK4, CLK2, CLKX5;
 
-		MachineClocks.MCLK_Freq		= ATARI_TT_PAL_MCLK;			/* 32.084988 MHz */
+		MachineClocks.MCLK_Freq		= ATARI_TT_MCLK;			/* 32.215905 MHz */
 		CLK32				= MachineClocks.MCLK_Freq;
 
 		MachineClocks.TTVIDEO_Freq	= MachineClocks.MCLK_Freq;		/* 32 MHz */
@@ -312,6 +315,7 @@ void	ClocksTimings_InitMachine ( MACHINETYPE MachineType )
 		MachineClocks.ACIA_Freq		= CLKX5;				/* 500 kHz (CLKX5) */
 		MachineClocks.IKBD_Freq		= ATARI_IKBD_CLK;			/* 1 MHz */
 		MachineClocks.SCC_Freq		= CLK8;					/* 8 MHz (CLK8) */
+		MachineClocks.MC146818A_Freq	= ATARI_MC146818A_CLK;			/* 32.768 kHz */
 	}
 
 	else if ( MachineType == MACHINE_FALCON )
@@ -351,6 +355,7 @@ void	ClocksTimings_InitMachine ( MACHINETYPE MachineType )
 		MachineClocks.ACIA_Freq		= KHZ500;				/* 500 kHz (KHZ500) */
 		MachineClocks.IKBD_Freq		= ATARI_IKBD_CLK;			/* 1 MHz */
 		MachineClocks.SCC_Freq		= CLK8;					/* 8 MHz (CLK8) */
+		MachineClocks.MC146818A_Freq	= ATARI_MC146818A_CLK;			/* 32.768 kHz */
 	}
 
 

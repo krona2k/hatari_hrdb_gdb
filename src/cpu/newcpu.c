@@ -75,6 +75,11 @@ bool check_prefs_changed_comp (bool checkonly) { return false; }
 //#endif
 #endif
 
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+jmp_buf jit_bus_error_jmpbuf;
+volatile bool jit_in_compiled_code = false;
+#endif
+
 /* Opcode of faulting instruction */
 static uae_u32 last_op_for_exception_3;
 /* PC at fault time */
@@ -106,6 +111,7 @@ static int baseclock;
 #endif
 int m68k_pc_indirect;
 bool m68k_interrupt_delay;
+int slow_cpu_access;
 static bool m68k_accurate_ipl;
 static bool m68k_reset_delay;
 static bool ismoves_nommu;
@@ -1490,7 +1496,7 @@ static void set_x_funcs (void)
 
 	icache_fetch = get_longi;
 	icache_fetch_word = NULL;
-	if (currprefs.cpu_cycle_exact) {
+	if (currprefs.cpu_memory_cycle_exact) {
 		icache_fetch = mem_access_delay_longi_read_ce020;
 	}
 	if (currprefs.cpu_model >= 68040 && currprefs.cpu_memory_cycle_exact) {
@@ -1862,6 +1868,11 @@ void flush_cpu_caches_040(uae_u16 opcode)
 	bool pushinv = (regs.cacr & 0x01000000) == 0; // 68060 DPI
 
 	flush_cpu_caches_040_2(cache, scope, addr, push, pushinv);
+#ifdef WITH_PPC
+	if (cache & 2) {
+		uae_ppc_mark_code_cache_dirty();
+	}
+#endif
 	mmu_flush_cache();
 }
 
@@ -2493,10 +2504,15 @@ void m68k_cancel_idle(void)
 
 static void m68k_set_stop(int stoptype)
 {
-	if (regs.stopped)
+	if (regs.stopped) {
 		return;
+	}
 	regs.stopped = stoptype;
 #ifndef WINUAE_FOR_HATARI
+	if (regs.intmask == 7) {
+		gui_data.cpu_stopped = 1;
+		gui_led(LED_CPU, 0, -1);
+	}
 	if (cpu_last_stop_vpos >= 0) {
 		cpu_last_stop_vpos = vpos;
 	}
@@ -2507,6 +2523,10 @@ static void m68k_unset_stop(void)
 {
 	regs.stopped = 0;
 #ifndef WINUAE_FOR_HATARI
+	if (gui_data.cpu_stopped) {
+		gui_data.cpu_stopped = 0;
+		gui_led(LED_CPU, 0, -1);
+	}
 	if (cpu_last_stop_vpos >= 0) {
 		cpu_stopped_lines += vpos - cpu_last_stop_vpos;
 		cpu_last_stop_vpos = vpos;
@@ -2524,8 +2544,9 @@ static void activate_trace(void)
 void checkint(void)
 {
 	doint();
-	if (!m68k_accurate_ipl && !currprefs.cachesize && !(regs.spcflags & SPCFLAG_INT) && (regs.spcflags & SPCFLAG_DOINT))
+	if (!m68k_accurate_ipl && !currprefs.cachesize && !(regs.spcflags & SPCFLAG_INT) && (regs.spcflags & SPCFLAG_DOINT)) {
 		set_special(SPCFLAG_INT);
+	}
 }
 
 void REGPARAM2 MakeSR(void)
@@ -3301,6 +3322,11 @@ static void Exception_mmu030 (int nr, uaecptr oldpc)
 		regs.intmask = nr - 24;
 	m68k_setpci (newpc);
 	fill_prefetch ();
+	// The exception has moved the PC and fill_prefetch() has reloaded the pipe
+	// for it. A stage B opcode captured before the exception belongs to the old
+	// instruction stream, but insretry prefers mmu030_opcode_stageb over
+	// regs.irc, so it would be dispatched at the vector's PC. Drop it.
+	mmu030_opcode_stageb = -1;
 	exception_check_trace (nr);
 }
 
@@ -3941,8 +3967,9 @@ static void cpu_halt_clear(void)
 {
 	regs.halted = 0;
 #ifndef WINUAE_FOR_HATARI
-	if (gui_data.cpu_halted) {
+	if (gui_data.cpu_halted || gui_data.cpu_stopped) {
 		gui_data.cpu_halted = 0;
+		gui_data.cpu_stopped = 0;
 		gui_led(LED_CPU, 0, -1);
 	}
 #endif
@@ -4801,6 +4828,10 @@ static bool haltloop_do(int vsynctimeline, frame_time_t rpt_end, int lines)
 			ppc_interrupt(intlev());
 			uae_ppc_execute_check();
 #endif
+			if (regs.spcflags & SPCFLAG_CALLBACK) {
+				unset_special(SPCFLAG_CALLBACK);
+				device_call_main_thread_callbacks();
+			}
 			if (regs.spcflags & (SPCFLAG_BRK | SPCFLAG_MODE_CHANGE)) {
 				if (regs.spcflags & SPCFLAG_BRK) {
 					unset_special(SPCFLAG_BRK);
@@ -4820,6 +4851,11 @@ static bool haltloop_do(int vsynctimeline, frame_time_t rpt_end, int lines)
 			ppc_interrupt(intlev());
 			uae_ppc_execute_check();
 #endif
+			if (regs.spcflags & SPCFLAG_CALLBACK) {
+				unset_special(SPCFLAG_CALLBACK);
+				device_call_main_thread_callbacks();
+			}
+
 			if (event_wait)
 				break;
 			frame_time_t d = read_processor_time() - rpt_end;
@@ -5056,7 +5092,7 @@ void doint(void)
 	if (m68k_interrupt_delay) {
 //fprintf ( stderr , "doint2 %d ipl=%x ipl_pin=%x intmask=%x spcflags=%x\n" , m68k_interrupt_delay,regs.ipl, regs.ipl_pin , regs.intmask, regs.spcflags );
 		if (!m68k_accurate_ipl && regs.ipl_pin > regs.intmask) {
-			set_special(SPCFLAG_INT);
+			set_special(SPCFLAG_DOINT);
 		}
 		return;
 	}
@@ -5102,6 +5138,13 @@ static int do_specialties (int cycles)
 	if (spcflags & SPCFLAG_MODE_CHANGE)
 		return 1;
 	
+#ifndef WINUAE_FOR_HATARI
+	if (spcflags & SPCFLAG_CALLBACK) {
+		unset_special(SPCFLAG_CALLBACK);
+		device_call_main_thread_callbacks();
+	}
+#endif
+
 	while (spcflags & SPCFLAG_CPUINRESET) {
 		cpu_halt_clear();
 		x_do_cycles(4 * CYCLE_UNIT);
@@ -5111,8 +5154,8 @@ static int do_specialties (int cycles)
 		}
 	}
 
- #ifndef WINUAE_FOR_HATARI
 	if (spcflags & SPCFLAG_CHECK) {
+#ifndef WINUAE_FOR_HATARI
 		if (regs.halted) {
 			if (regs.halted == CPU_HALT_ACCELERATOR_CPU_FALLBACK) {
 				return 1;
@@ -5134,9 +5177,9 @@ static int do_specialties (int cycles)
 			}
 		}
 		m68k_reset_delay = 0;
+#endif
 		unset_special(SPCFLAG_CHECK);
 	}
-#endif
 
 #ifdef ACTION_REPLAY
 #ifdef ACTION_REPLAY_HRTMON
@@ -5178,7 +5221,7 @@ static int do_specialties (int cycles)
 #endif
 
 #ifndef WINUAE_FOR_HATARI
-	while ((spcflags & SPCFLAG_BLTNASTY) && dmaen (DMA_BLITTER) && cycles > 0 && ((currprefs.waiting_blits && currprefs.cpu_model >= 68020) || !currprefs.blitter_cycle_exact)) {
+	while ((spcflags & SPCFLAG_BLTNASTY) && dmaen (DMA_BLITTER) && cycles > 0 && ((currprefs.waiting_blits && currprefs.cpu_model >= 68020) || !blitter_cycle_exact)) {
 		int c = blitnasty();
 		if (c < 0) {
 			break;
@@ -5198,6 +5241,16 @@ static int do_specialties (int cycles)
 			uae_ppc_execute_check();
 		}
 #endif
+	}
+
+	if (spcflags & SPCFLAG_CPU_SLOW) {
+		evt_t c = get_cck_cycles();
+		int cnt = 0;
+		while(regs.spcflags == SPCFLAG_CPU_SLOW && c == get_cck_cycles()) {
+			x_do_cycles(4 * CYCLE_UNIT);
+			cnt++;
+		}
+		unset_special(SPCFLAG_CPU_SLOW);
 	}
 #endif
 
@@ -5249,7 +5302,7 @@ static int do_specialties (int cycles)
 #endif
 
 //fprintf ( stderr , "dospec1 %d %d spcflags=%x ipl=%x ipl_pin=%x intmask=%x\n" , m68k_interrupt_delay,time_for_interrupt() , spcflags , regs.ipl , regs.ipl_pin, regs.intmask );
-		if (m68k_interrupt_delay) {
+		if (m68k_interrupt_delay && m68k_accurate_ipl) {
 			int ipl = time_for_interrupt();
 			if (ipl) {
 				unset_special(SPCFLAG_INT);
@@ -5258,7 +5311,7 @@ static int do_specialties (int cycles)
 		} else {
 			if (spcflags & SPCFLAG_INT) {
 				int intr = intlev();
-				unset_special (SPCFLAG_INT | SPCFLAG_DOINT);
+				unset_special(SPCFLAG_INT | SPCFLAG_DOINT);
 				if (intr > regs.intmask || (intr == 7 && intr > regs.lastipl)) {
 					do_interrupt(intr);
 				}
@@ -5774,10 +5827,15 @@ static void init_cpu_thread(void)
 
 extern addrbank *thread_mem_banks[MEMORY_BANKS];
 
+static bool is_cpu_thread(void)
+{
+	return cpu_thread_tid == uae_thread_get_id();
+}
+
 uae_u32 process_cpu_indirect_memory_read(uae_u32 addr, int size)
 {
 	// Do direct access if call is from filesystem etc thread 
-	if (cpu_thread_tid != uae_thread_get_id()) {
+	if (!is_cpu_thread()) {
 		uae_u32 data = 0;
 		addrbank *ab = thread_mem_banks[bankindex(addr)];
 		switch (size)
@@ -5806,7 +5864,7 @@ uae_u32 process_cpu_indirect_memory_read(uae_u32 addr, int size)
 
 void process_cpu_indirect_memory_write(uae_u32 addr, uae_u32 data, int size)
 {
-	if (cpu_thread_tid != uae_thread_get_id()) {
+	if (!is_cpu_thread()) {
 		addrbank *ab = thread_mem_banks[bankindex(addr)];
 		switch (size)
 		{
@@ -5970,7 +6028,7 @@ static void run_cpu_thread(void (*f)(void *))
 static void custom_reset_cpu(bool hardreset, bool keyboardreset)
 {
 #ifdef WITH_THREADED_CPU
-	if (cpu_thread_tid != uae_thread_get_id()) {
+	if (!is_cpu_thread()) {
 		custom_reset(hardreset, keyboardreset);
 		return;
 	}
@@ -5984,6 +6042,17 @@ static void custom_reset_cpu(bool hardreset, bool keyboardreset)
 #endif
 
 #ifdef JIT  /* Completely different run_2 replacement */
+
+#ifdef CPU_AARCH64
+void execute_exception(uae_u32 cycles)
+{
+	countdown -= cycles;
+	Exception_cpu(regs.jit_exception);
+	regs.jit_exception = 0;
+	cpu_cycles = adjust_cycles(4 * CYCLE_UNIT / 2);
+	do_cycles(cpu_cycles);
+}
+#endif
 
 void do_nothing (void)
 {
@@ -6060,6 +6129,14 @@ void execute_normal(void)
 		/* Take note: This is the do-it-normal loop */
 		r->opcode = get_jit_opcode();
 
+#if defined(JIT) && defined(CPU_x86_64)
+		/* High x86-64 natmem uses jit_n_addr_unsafe for pointer-clean
+		 * codegen decisions. Keep pc_hist.specmem reserved for real
+		 * special-bank flags. */
+		if (jit_n_addr_unsafe && !jit_n_addr_bank_unsafe) {
+			special_mem = 0;
+		} else
+#endif
 		special_mem = special_mem_default;
 		pc_hist[blocklen].location = (uae_u16*)r->pc_p;
 
@@ -6105,12 +6182,29 @@ static void cpu_thread_run_jit(void *v)
 #endif
 	{
 		for (;;) {
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+			{
+				int bus_error_exc = setjmp(jit_bus_error_jmpbuf);
+				if (bus_error_exc != 0) {
+					jit_in_compiled_code = false;
+					Exception(bus_error_exc);
+					continue;
+				}
+			}
+			jit_in_compiled_code = true;
+#endif
 			((compiled_handler*)(pushall_call_handler))();
 			/* Whenever we return from that, we should check spcflags */
 			if (regs.spcflags || cpu_thread_ilvl > 0) {
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+				jit_in_compiled_code = false;
+#endif
 				if (do_specialties_thread()) {
 					break;
 				}
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+				jit_in_compiled_code = true;
+#endif
 			}
 		}
 	}
@@ -6125,6 +6219,9 @@ static void cpu_thread_run_jit(void *v)
 	}
 #endif
 	cpu_thread_active = 0;
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+	jit_in_compiled_code = false;
+#endif
 }
 #endif
 
@@ -6151,6 +6248,16 @@ static void m68k_run_jit(void)
 #ifdef USE_STRUCTURED_EXCEPTION_HANDLING
 		__try {
 #endif
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+			{
+				int bus_error_exc = setjmp(jit_bus_error_jmpbuf);
+				if (bus_error_exc != 0) {
+					jit_in_compiled_code = false;
+					Exception(bus_error_exc);
+				}
+			}
+			jit_in_compiled_code = true;
+#endif
 			for (;;) {
 #ifdef WINUAE_FOR_HATARI
 				//m68k_dumpstate_file(stderr, NULL, 0xffffffff);
@@ -6164,13 +6271,22 @@ static void m68k_run_jit(void)
 				/* Whenever we return from that, we should check spcflags */
 				check_uae_int_request();
 				if (regs.spcflags) {
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+					jit_in_compiled_code = false;
+#endif
 					if (do_specialties(0)) {
 						STOPTRY;
 						return;
 					}
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+					jit_in_compiled_code = true;
+#endif
 				}
 				// If T0, T1 or M got set: run normal emulation loop
 				if (regs.t0 || regs.t1 || regs.m) {
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+					jit_in_compiled_code = false;
+#endif
 					flush_icache(3);
 					struct regstruct *r = &regs;
 					bool exit = false;
@@ -6187,6 +6303,9 @@ static void m68k_run_jit(void)
 						}
 					}
 					unset_special(SPCFLAG_END_COMPILE);
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+					jit_in_compiled_code = true;
+#endif
 				}
 			}
 
@@ -6669,9 +6788,18 @@ insretry:
 		} CATCH (prb) {
 
 			if (mmu030_opcode == -1) {
-				// full prefetch fill access fault
-				mmufixup[0].reg = -1;
-				mmufixup[1].reg = -1;
+				// Prefetch access fault. Usually raised while filling
+				// the pipe before the instruction starts, but also from
+				// inside an instruction (do_access_or_bus_error() when
+				// the next opcode's fetch lands in an unmapped page) after
+				// it has already adjusted an address register - the
+				// -(sp) of a MOVE that prefetches before its write. The
+				// instruction is restarted from scratch after the RTE,
+				// so undo those adjustments; a completed instruction has
+				// cleared its fixups and this is a no-op for it. The
+				// flags are left alone: a completed RTE/RTR whose target
+				// prefetch faults must keep the CCR it just loaded.
+				cpu_restore_fixup();
 			} else if (mmu030_state[1] & MMU030_STATEFLAG1_LASTWRITE) {
 				mmufixup[0].reg = -1;
 				mmufixup[1].reg = -1;
@@ -7292,7 +7420,6 @@ static void cpu_thread_run_2(void *v)
 	struct regstruct *r = &regs;
 
 	cpu_thread_tid = uae_thread_get_id();
-
 	cpu_thread_active = 1;
 	while (!exit) {
 		TRY(prb)
@@ -7561,6 +7688,35 @@ static void warpmode_reset(void)
 }
 #endif
 
+void m68k_run(void)
+{
+	void (*run_func)(void);
+
+	run_func = currprefs.cpu_cycle_exact && currprefs.cpu_model <= 68010 ? m68k_run_1_ce :
+		currprefs.cpu_compatible && currprefs.cpu_model <= 68010 ? m68k_run_1 :
+#ifdef JIT
+		currprefs.cpu_model >= 68020 && currprefs.cachesize ? m68k_run_jit :
+#endif
+		currprefs.cpu_model == 68030 && currprefs.mmu_model ? m68k_run_mmu030 :
+		currprefs.cpu_model == 68040 && currprefs.mmu_model ? m68k_run_mmu040 :
+		currprefs.cpu_model == 68060 && currprefs.mmu_model ? m68k_run_mmu060 :
+
+		currprefs.cpu_model >= 68040 && currprefs.cpu_cycle_exact ? m68k_run_3ce :
+		currprefs.cpu_model >= 68020 && currprefs.cpu_cycle_exact ? m68k_run_2ce :
+
+		currprefs.cpu_model <= 68020 && currprefs.cpu_compatible ? m68k_run_2p :
+		currprefs.cpu_model == 68030 && currprefs.cpu_compatible ? m68k_run_2p :
+		currprefs.cpu_model >= 68040 && currprefs.cpu_compatible ? m68k_run_3p :
+
+		currprefs.cpu_model < 68020 ? m68k_run_2_000 : m68k_run_2_020;
+
+	run_func();
+
+#ifdef WITH_THREADED_CPU
+	cpu_thread_tid = 0;
+#endif
+}
+
 void m68k_go (int may_quit)
 {
 	int hardboot = 1;
@@ -7585,7 +7741,6 @@ void m68k_go (int may_quit)
 	in_m68k_go++;
 	for (;;) {
 		int restored = 0;
-		void (*run_func)(void);
 
 #ifdef WINUAE_FOR_HATARI
 		/* Exit hatari ? */
@@ -7620,6 +7775,12 @@ void m68k_go (int may_quit)
 
 			hsync_counter = 0;
 			vsync_counter = 0;
+#ifndef WINUAE_FOR_HATARI
+			if (quit_program) {
+				set_cycles(start_cycles);
+				clear_events();
+			}
+#endif
 			quit_program = 0;
 
 #ifdef SAVESTATE
@@ -7813,32 +7974,7 @@ void m68k_go (int may_quit)
 		CpuRunCycleExact = false;
 #endif
 
-#if 0
-		if (mmu_enabled && !currprefs.cachesize) {
-			run_func = m68k_run_mmu;
-		} else {
-#endif
-			run_func = currprefs.cpu_cycle_exact && currprefs.cpu_model <= 68010 ? m68k_run_1_ce :
-				currprefs.cpu_compatible && currprefs.cpu_model <= 68010 ? m68k_run_1 :
-#ifdef JIT
-				currprefs.cpu_model >= 68020 && currprefs.cachesize ? m68k_run_jit :
-#endif
-				currprefs.cpu_model == 68030 && currprefs.mmu_model ? m68k_run_mmu030 :
-				currprefs.cpu_model == 68040 && currprefs.mmu_model ? m68k_run_mmu040 :
-				currprefs.cpu_model == 68060 && currprefs.mmu_model ? m68k_run_mmu060 :
-
-				currprefs.cpu_model >= 68040 && currprefs.cpu_cycle_exact ? m68k_run_3ce :
-				currprefs.cpu_model >= 68020 && currprefs.cpu_cycle_exact ? m68k_run_2ce :
-
-				currprefs.cpu_model <= 68020 && currprefs.cpu_compatible ? m68k_run_2p :
-				currprefs.cpu_model == 68030 && currprefs.cpu_compatible ? m68k_run_2p :
-				currprefs.cpu_model >= 68040 && currprefs.cpu_compatible ? m68k_run_3p :
-
-				currprefs.cpu_model < 68020 ? m68k_run_2_000 : m68k_run_2_020;
-#if 0
-		}
-#endif
-		run_func();
+		m68k_run();
 
 		if (quit_program < 0) {
 			quit_program = -quit_program;
@@ -7908,14 +8044,15 @@ void m68k_disasm_file (FILE *f, uaecptr addr, uaecptr *nextpc, uaecptr lastpc, i
  * Functions called from debug/68Disass.c, we need to check if MMU is enabled to do some address
  * translations on 'addr' if needed, depending on the CPU/MMU family
  */
-void m68k_disasm_file_wrapper (FILE *f, uaecptr addr, uaecptr *nextpc, uaecptr lastpc, int cnt)
+void m68k_disasm_file_wrapper (FILE *f, uaecptr addr, uaecptr *nextpc, int cnt)
 {
-	uaecptr new_addr = addr;
-
-	if ( currprefs.cpu_model == 68030 && currprefs.mmu_model )		/* 68030 with MMU */
-		new_addr = mmu030_translate(addr, regs.s != 0, false, false);
-
-	m68k_disasm_file(TraceFile, new_addr, nextpc, lastpc, cnt);
+	if (currprefs.mmu_model) {
+		/* 68030 with MMU */
+		if (currprefs.cpu_model == 68030)
+			addr = mmu030_translate(addr, regs.s != 0, false, false);
+		/* TODO: 040 / 060 */
+	}
+	m68k_disasm_file(f, addr, nextpc, addr, cnt);
 }
 #endif
 
@@ -8014,8 +8151,9 @@ void m68k_dumpstate(uaecptr *nextpc, uaecptr prevpc)
 		}
 	}
 	m68k_disasm (pc, nextpc, pc, 1);
-	if (nextpc)
+	if (nextpc) {
 		console_out_f (_T("Next PC: %08x\n"), *nextpc);
+	}
 }
 #ifdef WINUAE_FOR_HATARI
 void m68k_dumpstate_file (FILE *f, uaecptr *nextpc, uaecptr prevpc)
@@ -8030,6 +8168,9 @@ void m68k_dumpcache (bool dc)
 	if (!currprefs.cpu_compatible)
 		return;
 	if (currprefs.cpu_model == 68020) {
+		if (dc) {
+			return;
+		}
 		for (int i = 0; i < CACHELINES020; i += 4) {
 			for (int j = 0; j < 4; j++) {
 				int s = i + j;
@@ -8913,7 +9054,11 @@ void exception3_write(uae_u32 opcode, uaecptr addr, int size, uae_u32 val, int f
 
 void exception2_setup(uae_u32 opcode, uaecptr addr, bool read, int size, uae_u32 fc)
 {
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+	last_addr_for_exception_3 = jit_in_compiled_code ? regs.instruction_pc : m68k_getpc();
+#else
 	last_addr_for_exception_3 = m68k_getpc();
+#endif
 	last_fault_for_exception_3 = addr;
 	last_writeaccess_for_exception_3 = read == 0;
 	last_op_for_exception_3 = opcode;
@@ -8955,6 +9100,11 @@ void hardware_exception2(uaecptr addr, uae_u32 v, bool read, bool ins, int size)
 		}
 		// Non-MMU
 		exception2_setup(regs.opcode, addr, read, size, fc);
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+		if (jit_in_compiled_code) {
+			longjmp(jit_bus_error_jmpbuf, 2);
+		}
+#endif
 		THROW(2);
 	}
 }
@@ -10084,17 +10234,24 @@ void write_dcache030_retry(uaecptr addr, uae_u32 v, uae_u32 fc, int size, int fl
 {
 	regs.fc030 = fc;
 	mmu030_put_generic(addr, v, fc, size, flags);
-	write_dcache030x(addr, v, size, fc);
+	// Without data cache emulation nothing else keeps the cache lines in
+	// step with memory, so they must not be touched here either.
+	if (currprefs.cpu_data_cache)
+		write_dcache030x(addr, v, size, fc);
 }
 
-static void dcache030_maybe_burst(uaecptr addr, struct cache030 *c, int lws)
+static void dcache030_maybe_burst(uaecptr addr, struct cache030 *c, int lws, uae_u32 fc)
 {
 	// Do burst fetch if enabled, cache not frozen, all line slots invalid, and 32-bit CPU local bus (no chip ram).
 	// (See notes about burst fetches in icache routines)
 	if (c->valid[0] + c->valid[1] + c->valid[2] + c->valid[3] == 1) {
 		uaecptr physaddr = addr;
 		if (currprefs.mmu_model) {
-			physaddr = mmu030_translate(addr, regs.s != 0, false, false);
+			// Translate with the function code of the access that missed, not the
+			// CPU's privilege level: MOVES with SFC=user runs in supervisor mode, and
+			// a supervisor translation can match a transparent translation register
+			// and fill the (user-tagged) line from the wrong physical address.
+			physaddr = mmu030_translate(addr, (fc & 4) != 0, (fc & 1) != 0, false);
 		}
 
 		if (ce_banktype[physaddr >> 16] == CE_MEMBANK_FAST32) {
@@ -10248,7 +10405,7 @@ static bool read_dcache030_2(uaecptr addr, uae_u32 size, uae_u32 *valp)
 		v1 = dcache_lget(addr);
 		update_dcache030(c1, v1, tag1, fc, lws1);
 		if ((cs & CACHE_ENABLE_DATA_BURST) && (regs.cacr & 0x1100) == 0x1100)
-			dcache030_maybe_burst(addr, c1, lws1);
+			dcache030_maybe_burst(addr, c1, lws1, fc);
 #if VALIDATE_68030_DATACACHE
 		validate_dcache030();
 #endif
@@ -10285,7 +10442,7 @@ static bool read_dcache030_2(uaecptr addr, uae_u32 size, uae_u32 *valp)
 		v2 = dcache_lget(addr);
 		update_dcache030(c2, v2, tag2, fc, lws2);
 		if ((cs & CACHE_ENABLE_DATA_BURST) && (regs.cacr & 0x1100) == 0x1100)
-			dcache030_maybe_burst(addr, c2, lws2);
+			dcache030_maybe_burst(addr, c2, lws2, fc);
 #if VALIDATE_68030_DATACACHE
 		validate_dcache030();
 #endif
@@ -10334,7 +10491,10 @@ uae_u32 read_dcache030_retry(uaecptr addr, uae_u32 fc, int size, int flags)
 	uae_u32 val;
 	regs.fc030 = fc;
 
-	if (!read_dcache030_2(addr, size, &val)) {
+	// Without data cache emulation the cache lines are not kept in step
+	// with memory (only this retry path would fill them), so read memory,
+	// as the other 68030 MMU paths do.
+	if (!currprefs.cpu_data_cache || !read_dcache030_2(addr, size, &val)) {
 		return mmu030_get_generic(addr, fc, size, flags);
 	}
 	return val;
@@ -10498,13 +10658,22 @@ uae_u32 get_word_030_prefetch (int o)
 {
 	uae_u32 pc = m68k_getpc () + o;
 	uae_u32 v;
+	bool v_valid;
 
 	v = regs.prefetch020[0];
+	v_valid = regs.prefetch020_valid[0];
 	regs.prefetch020[0] = regs.prefetch020[1];
 	regs.prefetch020[1] = regs.prefetch020[2];
 	regs.prefetch020_valid[0] = regs.prefetch020_valid[1];
 	regs.prefetch020_valid[1] = regs.prefetch020_valid[2];
 	regs.prefetch020_valid[2] = false;
+	if (!v_valid) {
+		// The word being consumed never arrived (its prefetch faulted and
+		// was deferred because a branch was in the pipeline). The
+		// instruction needs it after all - a Bcc.L/BSR.L displacement,
+		// for example - so the deferred fault is taken now.
+		do_access_or_bus_error(0xffffffff, pc);
+	}
 	if (!regs.prefetch020_valid[1]) {
 		if (regs.pipeline_stop) {
 			regs.db = regs.prefetch020[0];

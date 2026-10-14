@@ -14,6 +14,8 @@
 #include "remotedebug.h"
 
 #include "config.h"
+#include "gui_event.h"
+#include "statusbar.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1304,8 +1306,8 @@ static int RemoteDebug_dmem(int nArgc, char *psArgs[], RemoteDebugState* state)
 	int arg;
 	uint32_t result = 0;
 	char memspace = 0;
-	Uint32 memdump_addr = 0;
-	Uint32 memdump_count = 0;
+	uint32_t memdump_addr = 0;
+	uint32_t memdump_count = 0;
 	const char* mem_str = NULL;
 
 	/* For remote debug, only "space" "address" "count" is supported */
@@ -2330,7 +2332,7 @@ static void RemoteDebugState_UpdateAccepted(RemoteDebugState* state)
 	{
 		// timeout, socket does not have anything to read.
 		// Run event handler while we know nothing changes
-		Main_EventHandler(true);
+		GuiEvent_EventHandlerRemoteDebug();
 		return;
 	}
 
@@ -2389,7 +2391,7 @@ static void SetStatusbarMessage(const RemoteDebugState* state)
 		Statusbar_AddMessage("gdb connected -- debugging", 100);
 	else
 		Statusbar_AddMessage("break -- waiting for hrdb or gdb", 100);
-	Statusbar_Update(sdlscrn, true);
+	Statusbar_UpdateInfo();
 }
 
 /*
@@ -2485,7 +2487,7 @@ static bool RemoteDebug_BreakLoop(debug_reason_t reason)
 			else
 			{
 				// No connection so update events
-				Main_EventHandler(true);
+				GuiEvent_EventHandlerRemoteDebug();
 			}
 		}
 		else
@@ -2510,7 +2512,7 @@ static bool RemoteDebug_BreakLoop(debug_reason_t reason)
 			if (state->AcceptedFD == -1)
 			{
 				// No connection so update events
-				Main_EventHandler(true);
+				GuiEvent_EventHandlerRemoteDebug();
 			}
 		}
 		else

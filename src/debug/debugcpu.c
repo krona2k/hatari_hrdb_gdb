@@ -31,6 +31,7 @@ const char DebugCpu_fileid[] = "Hatari debugcpu.c";
 #include "stMemory.h"
 #include "str.h"
 #include "symbols.h"
+#include "stacktrace.h"
 #include "68kDisass.h"
 #include "console.h"
 #include "options.h"
@@ -40,7 +41,6 @@ const char DebugCpu_fileid[] = "Hatari debugcpu.c";
 
 
 #define MEMDUMP_COLS   16      /* memdump, number of bytes per row */
-#define NON_PRINT_CHAR '.'     /* character to display for non-printables */
 
 static uint32_t disasm_addr;     /* disasm address */
 static uint32_t memdump_addr;    /* memdump address */
@@ -449,7 +449,7 @@ static int DebugCpu_Profile(int nArgc, char *psArgs[])
 }
 
 /**
- * helper: return type width (b/c=1, w=2, l=4)
+ * Helper: return type width (b/c=1, w=2, l=4)
  */
 static unsigned get_type_width(char mode)
 {
@@ -469,8 +469,7 @@ static unsigned get_type_width(char mode)
 
 
 /**
- * This is a helper function that prints `count` `size` sized memory items
- * from `addr` in `base`.
+ * Helper: print `count` `size` sized memory items from `addr` in `base`.
  * @param addr    the start address
  * @param count   the amount of items that should be printed
  * @param size    the size of one item
@@ -518,24 +517,16 @@ static void print_mem_values(uint32_t addr, int count, int size, int base)
 }
 
 /**
- * This is a helper function that prints `count` bytes from Atari `addr`
- * as host encoded chars.
+ * Helper: print `count` bytes from Atari `addr` using
+ * user-configured conversion for host character conversion.
  * @param addr   The ST RAM start address
  * @param count  the amount of bytes that should get printed
  */
 static void print_mem_chars(uint32_t addr, uint8_t count)
 {
-	char host[4], st[2];
-	st[1] = '\0';
-
 	for (int i = 0; i < count; i++)
 	{
-		st[0] = STMemory_ReadByte(addr + i);
-		if ((unsigned)st[0] >= 32 && st[0] != 127 &&
-		    Str_AtariToHost(st, host, sizeof(host), NON_PRINT_CHAR))
-			fprintf(debugOutput,"%s", host);
-		else
-			fputc(NON_PRINT_CHAR, debugOutput);
+		Str_PrintMemChar(debugOutput, STMemory_ReadByte(addr + i));
 	}
 }
 
@@ -550,7 +541,7 @@ int DebugCpu_MemDump(int nArgc, char *psArgs[])
 	uint32_t memdump_upper = 0;
 
 	if (nArgc > 1)
-		mode = tolower(psArgs[arg][0]);
+		mode = tolower((unsigned char)psArgs[arg][0]);
 
 	if (!mode || isdigit((unsigned char)psArgs[arg][0]) || psArgs[arg][1])
 	{
@@ -633,7 +624,7 @@ int DebugCpu_MemDump(int nArgc, char *psArgs[])
 
 
 /**
- * helper: return type base (b=1, o=8, d=10, h=16)
+ * Helper: return type base (b=1, o=8, d=10, h=16)
  */
 static unsigned get_type_base(char mode)
 {
@@ -694,7 +685,7 @@ static int DebugCpu_Struct(int nArgc, char *psArgs[])
 		if (maxlen < str - arg)
 			maxlen = str - arg;
 
-		type = tolower(*++str);
+		type = tolower((unsigned char)*++str);
 		size = get_type_width(type);
 		if (!size && type == 's')
 		    size = 1;
@@ -705,7 +696,7 @@ static int DebugCpu_Struct(int nArgc, char *psArgs[])
 		}
 
 		/* type followed by base? */
-		if (get_type_base(tolower(*++str)))
+		if (get_type_base(tolower((unsigned char)*++str)))
 			str++;
 
 		/* done? */
@@ -769,9 +760,9 @@ static int DebugCpu_Struct(int nArgc, char *psArgs[])
 		str = strchr(name, ':');
 		*str = '\0';
 
-		type = tolower(*++str);
+		type = tolower((unsigned char)*++str);
 		size = get_type_width(type);
-		base = get_type_base(tolower(*++str));
+		base = get_type_base(tolower((unsigned char)*++str));
 		if (!base)
 			base = 16;
 		else
@@ -828,7 +819,8 @@ static int DebugCpu_Struct(int nArgc, char *psArgs[])
 }
 
 
-/* helper to convert argument from host to Atari encoding.
+/**
+ * Helper: convert argument from host to Atari encoding.
  * returns false if argument could not be mapped completely,
  * or it maps to more than one Atari character.
  *
@@ -871,7 +863,7 @@ static int DebugCpu_MemWrite(int nArgc, char *psArgs[])
 	}
 
 	arg = 1;
-	mode = tolower(psArgs[arg][0]);
+	mode = tolower((unsigned char)psArgs[arg][0]);
 	max_values = ARRAY_SIZE(store.bytes);
 
 	if (!mode || isdigit((unsigned char)psArgs[arg][0]) || psArgs[arg][1])
@@ -1024,7 +1016,7 @@ static int DebugCpu_MemFind(int nArgc, char *psArgs[])
 	}
 
 	arg = 1;
-	mode = tolower(psArgs[arg][0]);
+	mode = tolower((unsigned char)psArgs[arg][0]);
 	max_values = ARRAY_SIZE(store.bytes);
 
 	if (!mode || isdigit((unsigned char)psArgs[arg][0]) || psArgs[arg][1])
@@ -1320,7 +1312,9 @@ static int DebugCpu_Next(int nArgc, char *psArgv[])
 	return DEBUGGER_CMDDONE;
 }
 
-/* helper to get instruction type */
+/**
+ * Helper: get instruction type
+ */
 uint32_t DebugCpu_OpcodeType(void)
 {
 	/* cannot use OpcodeFamily like profiler does,
@@ -1543,6 +1537,16 @@ static const dbgcommand_t cpucommands[] =
 	  "symbols", "",
 	  "load CPU symbols & their addresses",
 	  Symbols_Description,
+	  false },
+	{ StackTrace_Command, NULL,
+	  "backtrace", "bt",
+	  "stack backtrace using A6 frame pointer chain",
+	  "[max [fp]]\n"
+	  "\tWalk the A6 frame pointer chain and show call sites with symbols.\n"
+	  "\tFrame #0 is the current PC; further frames use return addresses\n"
+	  "\t(call site = return address - 2). <max> sets backtrace depth,\n"
+	  "\t'nBacktraceLines' is used otherwise (0 = 256 frame safety limit).\n"
+	  "\t<fp> value is the first frame pointer (default A6).\n",
 	  false },
 	{ DebugCpu_Step, NULL,
 	  "step", "s",

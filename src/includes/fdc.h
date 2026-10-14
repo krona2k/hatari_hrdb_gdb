@@ -61,6 +61,16 @@
 #define	FDC_DC_SIGNAL_INSERTED			1
 
 
+/* FDC emulation return codes for the commands' sub-states */
+#define	FDCEMU_RETURN_OK		0
+#define	FDCEMU_RETURN_NO_DRIVE_FLOPPY	(-1)
+#define	FDCEMU_RETURN_INDEX_PULSE	(-2)
+#define	FDCEMU_RETURN_NO_MORE_MFM_DATA	(-3)
+#define	FDCEMU_RETURN_BAD_ID		(-4)
+
+
+
+
 extern int	FDC_StepRate_ms[];
 
 
@@ -83,7 +93,7 @@ extern void	FDC_EjectFloppy ( int Drive );
 extern void	FDC_SetDriveSide ( uint8_t io_porta_old , uint8_t io_porta_new );
 extern int	FDC_GetBytesPerTrack ( uint8_t Drive , uint8_t Track , uint8_t Side );
 extern int	FDC_GetFloppyDensity ( uint8_t Drive );
-extern int	FDC_MachineHandleDensity ( uint8_t Drive );
+extern bool	FDC_CanMachineHandleDensity ( uint8_t Drive );
 
 extern int	FDC_IndexPulse_GetCurrentPos_FdcCycles ( uint32_t *pFdcCyclesPerRev );
 extern int	FDC_IndexPulse_GetCurrentPos_NbBytes ( void );
@@ -117,5 +127,82 @@ extern void	FDC_WriteDMAAddress ( uint32_t Address );
 
 extern void	FDC_DensityMode_WriteWord ( void );
 extern void	FDC_DensityMode_ReadWord ( void );
+
+
+
+/*-----------------------------------------------------------------------*/
+/*
+ * Flux to MFM bit decoding - BEGIN
+ * based on code by Keir Fraser https://github.com/keirf/Disk-Utilities
+ */
+
+struct mfm_stream {
+	struct mfm_stream_type {
+		int	(*select_track)(struct mfm_stream *, unsigned int tracknr);
+		void	(*reset)(struct mfm_stream *);
+		int	(*next_flux)(struct mfm_stream *);
+		void	*flux_struct_param;			/* pointer to "struct scp_stream" or similar */
+	} type;
+
+	/* Accumulated read latency in nanosecs. Can be reset by the caller. */
+	uint64_t latency;
+
+	/* N = last bitcell returned was Nth full bitcell after index pulse. */
+	uint32_t index_offset_bc; /* offset in bitcells (=N) */
+	uint32_t index_offset_ns; /* offset in nanoseconds */
+
+	/* Distance between the most recent two index pulses. */
+	uint32_t track_len_bc; /* in bitcells */
+	uint32_t track_len_ns; /* in nanoseconds */
+
+	/* Number of index pulses seen so far. */
+	uint32_t nr_index;
+
+	/* Maximum number of full revolutions to read. */
+	uint32_t max_revolutions;
+
+	/* Most recent 32 bits read from the stream. */
+	uint32_t word;
+
+	/* Flux-based streams: Adjustable parameters for FDC PLL emulation. When a
+	* flux transition occurs off-centre in the timing window, what percentage
+	* of that error delta is applied to the window period and phase. */
+	int pll_period_adj_pct; /* 0 - 100 */
+	int pll_phase_adj_pct;  /* 0 - 100 */
+
+	/* Flux-based streams. */
+	int flux;                /* Nanoseconds to next flux reversal */
+	int clock, clock_centre; /* Clock base value in nanoseconds */
+	unsigned int clocked_zeros;
+	int ns_to_index;         /* Distance to next index pulse */
+
+	uint32_t prng_seed;
+
+	/* Hatari specific */
+	uint32_t RevolutionsNbr;	/* number of revolutions to image selected track */
+};
+
+
+uint16_t mfm_stream_rnd16 ( uint32_t *p_seed );
+void	mfm_stream_setup ( struct mfm_stream *s , unsigned int drive_rpm, unsigned int data_rpm );
+int	mfm_stream_select_track ( struct mfm_stream *s , unsigned int tracknr );
+void	mfm_stream_reset ( struct mfm_stream *s );
+void	mfm_stream_next_index ( struct mfm_stream *s );
+int	mfm_stream_next_bit ( struct mfm_stream *s );
+int	mfm_stream_next_bits ( struct mfm_stream *s , unsigned int bits );
+int	mfm_stream_next_bytes ( struct mfm_stream *s , void *p , unsigned int bytes );
+int	mfm_stream_skip ( struct mfm_stream *s , uint32_t FdcCycles );
+
+extern	struct mfm_stream		MFM_STREAMS[ MAX_FLOPPYDRIVES ];
+
+
+/*
+ * Flux to MFM bit decoding - END
+ */
+
+
+void	MFM_Stream_DumpTrack ( struct mfm_stream *s , int InitialShift );
+
+
 
 #endif /* ifndef HATARI_FDC_H */

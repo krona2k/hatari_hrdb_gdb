@@ -85,9 +85,7 @@ static void History_Enable(history_type_t track, unsigned limit)
 	const char *msg;
 	if (track != HistoryTracking || limit != History.limit) {
 		fprintf(stderr, "Re-allocating & zeroing history due to type/limit change.\n");
-		if (History.item) {
-			free(History.item);
-		}
+		free(History.item);
 		memset(&History, 0, sizeof(History));
 		History.item = calloc(limit, sizeof(History.item[0]));
 		History.limit = limit;
@@ -397,4 +395,3 @@ void History_Get(unsigned int offset, history_entry_rdb* pEntry)
 	else
 		pEntry->pc = History.item[i].pc.cpu;
 }
-

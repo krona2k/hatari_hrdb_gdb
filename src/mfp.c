@@ -2485,7 +2485,7 @@ void	MFP_TimerCDCtrl_ReadByte ( void )
 
 /*-----------------------------------------------------------------------*/
 /**
- * Handle read from Timer A Data Egister TADR (0xfffa1f or 0xfffa9f)
+ * Handle read from Timer A Data Register TADR (0xfffa1f or 0xfffa9f)
  */
 void	MFP_TimerAData_ReadByte ( void )
 {

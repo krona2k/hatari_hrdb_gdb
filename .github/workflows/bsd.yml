@@ -1,0 +1,49 @@
+name: Build Hatari on BSDs
+
+on:
+  push:
+    branches:
+    - main
+    - test
+    tags:
+    - v*
+
+jobs:
+
+  freebsd:
+    runs-on: ubuntu-latest
+    name: Compile Hatari on FreeBSD
+    steps:
+    - uses: actions/checkout@v6
+    - name: Compile Hatari with FreeBSD
+      id: test
+      uses: vmactions/freebsd-vm@v1
+      with:
+        usesh: true
+        prepare: |
+          pkg update
+          pkg install -y cmake gmake pkgconf capstone4 GraphicsMagick png \
+              devel/sdl20 devel/libedit
+        run: |
+          uname -a
+          ./configure --enable-debug --enable-werror || { cat config.log; exit 1; }
+          gmake -j$(sysctl -n hw.ncpu)
+          ctest -j$(sysctl -n hw.ncpu) --output-on-failure
+
+  openbsd:
+    runs-on: ubuntu-latest
+    name: Compile Hatari on OpenBSD
+    steps:
+    - uses: actions/checkout@v6
+    - name: Compile Hatari with OpenBSD
+      id: test
+      uses: vmactions/openbsd-vm@v1
+      with:
+        usesh: true
+        prepare: |
+          pkg_add cmake gmake pkgconf devel/sdl2 png
+        run: |
+          uname -a
+          ./configure --enable-debug --enable-werror || { cat config.log; exit 1; }
+          gmake -j$(sysctl -n hw.ncpu)
+          ctest -j$(sysctl -n hw.ncpu) --output-on-failure

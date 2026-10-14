@@ -194,6 +194,13 @@ typedef struct
 #endif
 } fpdata;
 
+#ifdef CPU_AARCH64
+#ifdef JIT
+#include "jit/comptbl.h"
+#include "jit/compemu.h"
+#endif
+#endif
+
 struct regstruct
 {
 	uae_u32 regs[16];
@@ -288,6 +295,20 @@ struct regstruct
 	int ce020_tail;
 	evt_t ce020_tail_cycles;
 	int memory_waitstate_cycles;
+
+#ifdef CPU_AARCH64
+#ifdef JIT
+	/* store scratch regs also in this struct to avoid load of mem pointer */
+	uae_u32 scratchregs[VREGS - S1];
+	fpu_register scratchfregs[VFREGS - 8];
+	uae_u32 jit_exception;
+
+	/* pointer to real arrays/structs for easier access in JIT */
+	uae_u32* raw_cputbl_count;
+	uintptr mem_banks;
+	uintptr cache_tags;
+#endif
+#endif
 };
 
 extern struct regstruct regs;
@@ -344,32 +365,34 @@ extern bool cpu_bus_rmw;			// WINUAE_FOR_HATARI
 
 extern void safe_interrupt_set(int, int, bool);
 
-#define SPCFLAG_CPUINRESET 2
-#define SPCFLAG_INT 8
-#define SPCFLAG_BRK 16
-#define SPCFLAG_UAEINT 32
-#define SPCFLAG_TRACE 64
-#define SPCFLAG_DOTRACE 128
-#define SPCFLAG_DOINT 256 /* arg, JIT fails without this.. */
-//#define SPCFLAG_BLTNASTY 512
-#define SPCFLAG_EXEC 1024
-//#define SPCFLAG_ACTION_REPLAY 2048
-//#define SPCFLAG_TRAP 4096 /* enforcer-hack */
-#define SPCFLAG_MODE_CHANGE 8192
+#define SPCFLAG_CPUINRESET	0x000002
+#define SPCFLAG_CPU_SLOW	0x000004
+#define SPCFLAG_INT		0x000008
+#define SPCFLAG_BRK		0x000010
+#define SPCFLAG_UAEINT		0x000020
+#define SPCFLAG_TRACE		0x000040
+#define SPCFLAG_DOTRACE		0x000080
+#define SPCFLAG_DOINT		0x000100 /* arg, JIT fails without this.. */
+#define SPCFLAG_BLTNASTY	0x000200
+#define SPCFLAG_EXEC		0x000400
+#define SPCFLAG_ACTION_REPLAY	0x000800
+#define SPCFLAG_TRAP		0x001000 /* enforcer-hack */
+#define SPCFLAG_MODE_CHANGE	0x002000
 #ifdef JIT
-#define SPCFLAG_END_COMPILE 16384
+#define SPCFLAG_END_COMPILE	0x004000
 #endif
-#define SPCFLAG_CHECK 32768
-#define SPCFLAG_MMURESTART 65536
+#define SPCFLAG_CHECK		0x008000
+#define SPCFLAG_MMURESTART	0x010000
+#define SPCFLAG_CALLBACK	0x020000
 
 #ifdef WINUAE_FOR_HATARI
 // Hatari's specific flags
-#define SPCFLAG_DEBUGGER 0x1000000
-#define SPCFLAG_STOP 0x2000000
-#define SPCFLAG_BUSERROR 0x4000000
-#define SPCFLAG_EXTRA_CYCLES 0x8000000
-#define SPCFLAG_MFP 0x10000000
-#define SPCFLAG_DSP 0x20000000			// TODO : remove with do_specialties_interrupt()
+#define SPCFLAG_DEBUGGER	0x1000000
+#define SPCFLAG_STOP		0x2000000
+#define SPCFLAG_BUSERROR	0x4000000
+#define SPCFLAG_EXTRA_CYCLES	0x8000000
+#define SPCFLAG_MFP		0x10000000
+#define SPCFLAG_DSP		0x20000000		// TODO : remove with do_specialties_interrupt()
 #endif
 
 #ifndef WINUAE_FOR_HATARI
@@ -749,7 +772,7 @@ extern void m68k_disasm (uaecptr addr, uaecptr *nextpc, uaecptr lastpc, int cnt)
 extern uae_u32 m68k_disasm_2(TCHAR *buf, int bufsize, uaecptr pc, uae_u16 *bufpc, int bufpccount, uaecptr *nextpc, int cnt, uae_u32 *seaddr, uae_u32 *deaddr, uaecptr lastpc, int safemode);
 #ifdef WINUAE_FOR_HATARI
 extern void m68k_disasm_file (FILE *f, uaecptr addr, uaecptr *nextpc, uaecptr lastpc, int cnt);
-extern void m68k_disasm_file_wrapper (FILE *f, uaecptr addr, uaecptr *nextpc, uaecptr lastpc, int cnt);
+extern void m68k_disasm_file_wrapper (FILE *f, uaecptr addr, uaecptr *nextpc, int cnt);
 #endif
 extern void sm68k_disasm (TCHAR*, TCHAR*, uaecptr addr, uaecptr *nextpc, uaecptr lastpc);
 extern int m68k_asm(TCHAR *buf, uae_u16 *out, uaecptr pc);
@@ -786,6 +809,7 @@ extern int m68k_movec2 (int, uae_u32 *);
 extern int m68k_divl (uae_u32, uae_u32, uae_u16, uaecptr);
 extern int m68k_mull (uae_u32, uae_u32, uae_u16);
 extern void init_m68k (void);
+extern void m68k_run(void);
 extern void m68k_go (int);
 extern void m68k_dumpstate(uaecptr *, uaecptr);
 #ifdef WINUAE_FOR_HATARI

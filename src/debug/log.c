@@ -27,7 +27,6 @@ const char Log_fileid[] = "Hatari log.c";
 #include "console.h"
 #include "dialog.h"
 #include "log.h"
-#include "screen.h"
 #include "file.h"
 #include "vdi.h"
 #include "options.h"
@@ -97,6 +96,8 @@ static flagname_t TraceFlags[] = {
 	{ TRACE_DSP_INTERRUPT	 , "dsp_interrupt" },
 	{ TRACE_DSP_STATE	 , "dsp_state" },
 	{ TRACE_DSP_SYMBOLS	 , "dsp_symbols" },
+
+	{ TRACE_EVENT_ACTION	 , "event" },
 
 	{ TRACE_FDC		 , "fdc" },
 
@@ -171,22 +172,24 @@ uint64_t LogTraceFlags = TRACE_NONE;
 FILE *TraceFile = NULL;
 
 
-/* SDL GUI Alerts can show 4*50 chars at max, and much longer
- * console messages are not very readable either, just slow
+/* SDL GUI Alerts can show 4*50 chars at max.  Use that also
+ * as initial message buffer size (must be longer than log prefixes)
  */
-#define MAX_MSG_LEN 256
+#define MAX_DIAG_MSG_LEN 256
 #define REPEAT_LIMIT_INIT 8
 
-/* FILE* for output stream, message line repeat suppression limit,
- * current repeat count, and previous line content for checking
- * repetition
+/* FILE* for output stream, buffers for message formatting + previous
+ * message content, message line repeat suppression limit and current
+ * repeat count
  */
 static struct {
 	/* prev msg fp, in case same msg goes to multiple FILE*s */
 	FILE *fp;
 	int limit;
 	int count;
-	char prev[MAX_MSG_LEN];
+	int buf_size;
+	char *current; // buffer: message formatting
+	char *prev;    // buffer: previous message
 } MsgState;
 
 static FILE *hLogFile = NULL;
@@ -204,6 +207,14 @@ void Log_Default(void)
 	hLogFile = stderr;
 	TraceFile = stderr;
 	TextLogLevel = LOG_INFO;
+
+	if (!MsgState.buf_size)
+	{
+		MsgState.buf_size = MAX_DIAG_MSG_LEN;
+		MsgState.prev = malloc(MsgState.buf_size);
+		MsgState.current = malloc(MsgState.buf_size);
+		assert(MsgState.current && MsgState.prev);
+	}
 	MsgState.limit = REPEAT_LIMIT_INIT;
 }
 
@@ -291,14 +302,15 @@ static bool printPendingMsgRepeat(FILE *fp)
 }
 
 /**
- * Output pending and given messages when appropriate,
- * and cache given fp & message if it's not a repeat.
+ * Output MsgState ".prev" (pending/cached) & ".current" messages
+ * when appropriate, and cache given fp & ".current" message,
+ * if it's not a repeat.
  */
-static void addMsgRepeat(FILE *fp, const char *line)
+static void addMsgRepeat(FILE *fp)
 {
 	/* repeated message? */
 	if (fp == MsgState.fp &&
-	    unlikely(strcmp(line, MsgState.prev) == 0))
+	    unlikely(strcmp(MsgState.current, MsgState.prev) == 0))
 	{
 		MsgState.count++;
 		/* limit crossed? -> print + increase repeat limit */
@@ -314,17 +326,18 @@ static void addMsgRepeat(FILE *fp, const char *line)
 	/* no repeat -> print previous message/repeat */
 	printPendingMsgRepeat(MsgState.fp);
 
-	/* store + print new message */
-	Str_Copy(MsgState.prev, line, sizeof(MsgState.prev));
+	/* store + print current message */
+	strcpy(MsgState.prev, MsgState.current);
 	MsgState.limit = REPEAT_LIMIT_INIT;
 	MsgState.count = 0;
 	MsgState.fp = fp;
-	fputs(line, fp);
+	fputs(MsgState.current, fp);
 	fflush(fp);
 }
 
 /**
- * Output pending messages repeat info and reset repeat info.
+ * Init message repeat buffer (if needed), output pending messages
+ * repeat info and reset repeat info.
  */
 void Log_ResetMsgRepeat(void)
 {
@@ -360,60 +373,117 @@ void Log_ToggleMsgRepeat(void)
 
 /*-----------------------------------------------------------------------*/
 /**
- * Add log prefix to given string and return its lenght
+ * Resize message buffers to accommodate requested amount, and
+ * set new message buffer address to 'buf' & max len to 'max_len'.
+ * Asserts that allocations succeed.
  */
-static int Log_AddPrefix(char *msg, int len, LOGTYPE idx)
+static void MsgResize(int size, char **buf, int *max_len)
 {
-	static const char* prefix[] = LOG_NAMES;
+	int buf_size = MsgState.buf_size;
+	while (buf_size <= size)
+		buf_size *= 2;
 
-	assert(idx >= 0 && idx < ARRAY_SIZE(prefix));
-	return snprintf(msg, len, "%s: ", prefix[idx]);
+	//fprintf(stderr, "message too long, resize log/trace buffers (%d => %d):\n%s\n",
+	//	MsgState.buf_size, buf_size, *buf);
+
+	MsgState.current = realloc(MsgState.current, buf_size);
+	MsgState.prev = realloc(MsgState.prev, buf_size);
+	assert(MsgState.current && MsgState.prev);
+
+	*max_len = MsgState.buf_size = buf_size;
+	*buf = MsgState.current;
 }
 
 /**
- * Add a new-line if it's missing. 'msg' points to place
- * where it should be, and size is buffer size.
+ * Add a new-line if it's missing. 'end' points to place
+ * where it should be. It's caller responsibility to make
+ * sure buffer has space for 1 additional character.
  */
-static void addMissingNewline(char *msg, int size)
+static void addMissingNewline(char *end)
 {
-	assert(size > 2);
-	if (size > 2 && msg[0] != '\n')
+	if (end[0] != '\n')
 	{
-		msg[1] = '\n';
-		msg[2] = '\0';
+		end[1] = '\n';
+		end[2] = '\0';
 	}
 }
 
+/**
+ * Return true if message ends in a newline, false otherwise
+ */
+static bool endsInNewline(const char *msg)
+{
+	int len = strlen(msg);
+	return (len > 0 && msg[len-1] == '\n');
+}
 
 /*-----------------------------------------------------------------------*/
+/**
+ * Output string to log file, arguments as a va_list
+ */
+static void Log_VPrintf(LOGTYPE nType, const char *psFormat, va_list args)
+{
+	if (!(hLogFile && nType <= TextLogLevel))
+		return;
+
+	/* log prefixes */
+	static const char* prefixes[] = LOG_NAMES;
+	assert(nType >= 0 && nType < ARRAY_SIZE(prefixes));
+
+	va_list argptr;
+
+	if (!MsgState.limit)
+	{
+		/* output directly */
+		fprintf(hLogFile, "%s: ", prefixes[nType]);
+		vfprintf(hLogFile, psFormat, args);
+		if (!endsInNewline(psFormat))
+		    fputs("\n", hLogFile);
+		return;
+	}
+
+	/* trace goes through repeat handling buffer */
+	char *msg = MsgState.current;
+	int count, prefix_len, len = MsgState.buf_size;
+
+	/* set prefix */
+	prefix_len = snprintf(msg, len, "%s: ", prefixes[nType]);
+	msg += prefix_len;
+	len -= prefix_len;
+
+	/* add message */
+	va_copy(argptr, args);
+	count = vsnprintf(msg, len, psFormat, argptr);
+	va_end(argptr);
+
+	/* buffer too small for message+newline? */
+	if (count+1 >= len)
+	{
+		/* resize & retry */
+		MsgResize(count+1, &msg, &len);
+		msg += prefix_len;
+		len -= prefix_len;
+
+		va_copy(argptr, args);
+		count = vsnprintf(msg, len, psFormat, argptr);
+		va_end(argptr);
+	}
+
+	/* buffer / output with newline */
+	addMissingNewline(msg + count - 1);
+	addMsgRepeat(hLogFile);
+}
+
 /**
  * Output string to log file
  */
 void Log_Printf(LOGTYPE nType, const char *psFormat, ...)
 {
-	if (!(hLogFile && nType <= TextLogLevel))
-		return;
-
-	char line[sizeof(MsgState.prev)];
-	int count, len = sizeof(line);
-	char *msg = line;
-
-	count = Log_AddPrefix(line, len, nType);
-	msg += count;
-	len -= count;
-
 	va_list argptr;
-	va_start(argptr, psFormat);
-	count = vsnprintf(msg, len, psFormat, argptr);
-	va_end(argptr);
-	msg += count;
-	len -= count;
 
-	addMissingNewline(msg-1, len+1);
-	if (MsgState.limit)
-		addMsgRepeat(hLogFile, line);
-	else
-		fputs(line, hLogFile);
+	va_start(argptr, psFormat);
+	Log_VPrintf(nType, psFormat, argptr);
+	va_end(argptr);
 }
 
 
@@ -428,31 +498,15 @@ void Log_AlertDlg(LOGTYPE nType, const char *psFormat, ...)
 	/* Output to log file: */
 	if (hLogFile && nType <= TextLogLevel)
 	{
-		char line[sizeof(MsgState.prev)];
-		int count, len = sizeof(line);
-		char *msg = line;
-
-		count = Log_AddPrefix(line, len, nType);
-		msg += count;
-		len -= count;
-
 		va_start(argptr, psFormat);
-		count = vsnprintf(msg, len, psFormat, argptr);
+		Log_VPrintf(nType, psFormat, argptr);
 		va_end(argptr);
-		msg += count;
-		len -= count;
-
-		addMissingNewline(msg-1, len+1);
-		if (MsgState.limit)
-			addMsgRepeat(hLogFile, line);
-		else
-			fputs(line, hLogFile);
 	}
 
 	/* Show alert dialog box: */
-	if (sdlscrn && nType <= AlertDlgLogLevel)
+	if (nType <= AlertDlgLogLevel)
 	{
-		char buf[MAX_MSG_LEN];
+		char buf[MAX_DIAG_MSG_LEN];
 		va_start(argptr, psFormat);
 		vsnprintf(buf, sizeof(buf), psFormat, argptr);
 		va_end(argptr);
@@ -593,6 +647,16 @@ Log_ParseOptionFlags (const char *FlagsStr, flagname_t *Flags, int MaxFlags, uin
 }
 
 /**
+ * Parse/check specified exception flags.
+ * Return error string or NULL for success.
+ */
+const char* Log_CheckExceptionDebugMask (const char *FlagsStr)
+{
+	uint64_t mask = ConfigureParams.Debugger.nExceptionDebugMask;
+	return Log_ParseOptionFlags(FlagsStr, ExceptionFlags, ARRAY_SIZE(ExceptionFlags), &mask);
+}
+
+/**
  * Parse exception flags and store results in ExceptionDebugMask.
  * Return error string or NULL for success.
  * 
@@ -602,14 +666,24 @@ const char* Log_SetExceptionDebugMask (const char *FlagsStr)
 {
 	const char *errstr;
 
+	/* config var is int, but parser function takes *uint64_t */
 	uint64_t mask = ConfigureParams.Debugger.nExceptionDebugMask;
 	errstr = Log_ParseOptionFlags(FlagsStr, ExceptionFlags, ARRAY_SIZE(ExceptionFlags), &mask);
 	ConfigureParams.Debugger.nExceptionDebugMask = mask;
 	return errstr;
 }
 
-
 #if ENABLE_TRACING
+
+/**
+ * Parse/check specified trace flags.
+ * Return error string or NULL for success.
+ */
+const char* Log_CheckTraceOptions (const char *FlagsStr)
+{
+	uint64_t flags = LogTraceFlags;
+	return Log_ParseOptionFlags(FlagsStr, TraceFlags, ARRAY_SIZE(TraceFlags), &flags);
+}
 
 /**
  * Parse trace flags and store results in LogTraceFlags.
@@ -664,32 +738,58 @@ char *Log_MatchTrace(const char *text, int state)
  */
 void Log_Trace(const char *format, ...)
 {
-	va_list argptr;
-	char line[sizeof(MsgState.prev)];
-
 	if (!TraceFile)
 		return;
 
-	va_start(argptr, format);
-	if (MsgState.limit)
+	va_list argptr;
+
+	if (!MsgState.limit)
 	{
-		vsnprintf(line, sizeof(line), format, argptr);
-		addMsgRepeat(TraceFile, line);
-	}
-	else
-	{
+		/* output directly */
+		va_start(argptr, format);
 		vfprintf(TraceFile, format, argptr);
+		va_end(argptr);
+		if (!endsInNewline(format))
+		    fputs("\n", TraceFile);
 		fflush(TraceFile);
+		return;
 	}
+
+	/* trace goes through repeat handling buffer */
+	char *msg = MsgState.current;
+	int count, len = MsgState.buf_size;
+
+	va_start(argptr, format);
+	count = vsnprintf(msg, len, format, argptr);
 	va_end(argptr);
+
+	/* buffer too small for message+newline? */
+	if (count+1 >= len)
+	{
+		/* resize & retry */
+		MsgResize(count+1, &msg, &len);
+		va_start(argptr, format);
+		count = vsnprintf(msg, len, format, argptr);
+		va_end(argptr);
+	}
+
+	/* buffer / output with newline */
+	addMissingNewline(msg + count - 1);
+	addMsgRepeat(TraceFile);
 }
 
 #else	/* !ENABLE_TRACING */
 
 /** dummy */
-const char* Log_SetTraceOptions (const char *FlagsStr)
+const char* Log_CheckTraceOptions (const char *FlagsStr)
 {
 	return "Hatari has been compiled without ENABLE_TRACING!";
+}
+
+/** dummy */
+const char* Log_SetTraceOptions (const char *FlagsStr)
+{
+	return Log_CheckTraceOptions(FlagsStr);
 }
 
 /** dummy */

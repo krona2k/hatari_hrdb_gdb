@@ -8,7 +8,7 @@ build-minimal:
  - CFLAGS="-D_FORTIFY_SOURCE=3"
    ./configure --disable-dsp --enable-debug --disable-tracing --enable-werror
  - make -j$(nproc)
- - ctest -j$(nproc)
+ - ctest -j$(nproc) || { cat Testing/Temporary/LastTest.log; exit 1; }
 
 build-32bit:
  script:
@@ -18,39 +18,45 @@ build-32bit:
                       libgcc1:i386 libportmidi-dev:i386 libpng-dev:i386
                       libglib2.0-dev:i386 zlib1g-dev:i386
                       libsdl2-dev:i386 libudev-dev:i386 libreadline-dev:i386
+                      libarchive-dev:i386 retroarch-dev
  - CC="clang" CFLAGS="-m32 -O3 -Werror -D_FORTIFY_SOURCE=3"
    ./configure --enable-debug
  - make -j$(nproc)
  - file src/hatari | grep 32.bit
- - ctest -j$(nproc)
+ - ctest -j$(nproc) || { cat Testing/Temporary/LastTest.log; exit 1; }
 
 build-mingw:
   image: fedora:41
   variables:
     GIT_DEPTH: 1000
   cache:
+    key: "cache-$CI_JOB_NAME"
     paths:
       - libs
   before_script:
     - dnf update -y
     - dnf install -y autoconf cmake git make gawk gcc mingw64-gcc mingw64-gcc-c++
                      mingw64-libstdc++ mingw64-SDL2 mingw64-zlib mingw64-libpng
+                     mingw64-libarchive
   script:
     - if [ ! -d libs ]; then mkdir libs ; fi
     - cd libs
+    - MINGW_TARGET=x86_64-w64-mingw32
+    - MINGW_PREFIX=/usr/$MINGW_TARGET/sys-root/mingw
+
     # Prepare CAPS library
-    - MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw
-    - if [ ! -d capsimg ]; then ../ci/build-mingw-capsimg.sh; fi
+    - if [ ! -d capsimg ]; then ../ci/build-mingw-capsimg.sh $MINGW_TARGET; fi
     - cp capsimg/CAPSImg/capsimg.dll $MINGW_PREFIX/bin/
     - cp capsimg/CAPSImg/capsimg.dll.a $MINGW_PREFIX/lib/
     - mkdir -p $MINGW_PREFIX/include/caps
     - cp capsimg/LibIPF/* capsimg/Core/CommonTypes.h $MINGW_PREFIX/include/caps
+
     # Prepare PortMidi library
     - if [ ! -d portmidi ]; then
         git clone https://github.com/PortMidi/portmidi.git
             --shallow-since=2025-01-01 -c advice.detachedHead=false &&
         cd portmidi &&
-        git checkout 806aa16c7d3c &&
+        git checkout v2.0.8 &&
         cmake -DCMAKE_TOOLCHAIN_FILE=../../cmake/Toolchain-mingw32-win64_64.cmake . &&
         make -j$(nproc) &&
         cd .. ;
@@ -58,14 +64,16 @@ build-mingw:
     - cp portmidi/libportmidi.dll $MINGW_PREFIX/bin/
     - cp portmidi/libportmidi.dll.a $MINGW_PREFIX/lib/
     - cp -v portmidi/pm_common/*.h $MINGW_PREFIX/include/
+
     # Now build Hatari
     - mkdir ../build
     - cd ../build
     - VERSION=$(git describe)
     - cmake -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchain-mingw32-win64_64.cmake
-            -DENABLE_WERROR:BOOL=1 ..
+            -DENABLE_WERROR:BOOL=1 -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo ..
     - make -j$(nproc)
     - cd ..
+
     # And finally create the package
     - mkdir hatari-$VERSION
     - mv build/src/hatari.exe gpl.txt readme.txt hatari-$VERSION/
@@ -75,8 +83,9 @@ build-mingw:
     - rm -r de fr doxygen
     - cd ../..
     - DLLS=(SDL2.dll capsimg.dll zlib1.dll libpng16-16.dll libwinpthread-1.dll
-            libportmidi.dll libstdc++-6.dll libgcc_s_seh-1.dll)
-    - cp ${DLLS[@]/#/\/usr\/x86_64-w64-mingw32\/sys-root\/mingw\/bin\//}
+            libportmidi.dll libstdc++-6.dll libgcc_s_seh-1.dll
+            libarchive-13.dll libbz2-1.dll iconv.dll liblzma-5.dll libxml2-2.dll libnettle-8.dll)
+    - cp ${DLLS[@]/#/\/usr\/$MINGW_TARGET\/sys-root\/mingw\/bin\//}
          hatari-$VERSION/
     - cp libs/capsimg/LICENCE.txt hatari-$VERSION/capsimg-license.txt
     - cp libs/portmidi/license.txt hatari-$VERSION/portmidi-license.txt
@@ -85,15 +94,84 @@ build-mingw:
     paths:
       - ./*.zip
 
+build-mingw-32:
+  image: fedora:41
+  variables:
+    GIT_DEPTH: 1000
+  cache:
+    key: "cache-$CI_JOB_NAME"
+    paths:
+      - libs
+  before_script:
+    - dnf update -y
+    - dnf install -y autoconf cmake git make gawk gcc mingw32-gcc mingw32-gcc-c++
+                     mingw32-libstdc++ mingw32-SDL2 mingw32-zlib mingw32-libpng
+                     mingw32-libarchive
+  script:
+    - if [ ! -d libs ]; then mkdir libs ; fi
+    - cd libs
+    - MINGW_TARGET=i686-w64-mingw32
+    - MINGW_PREFIX=/usr/$MINGW_TARGET/sys-root/mingw
+
+    # Prepare CAPS library
+    - if [ ! -d capsimg ]; then ../ci/build-mingw-capsimg.sh $MINGW_TARGET; fi
+    - cp capsimg/CAPSImg/capsimg.dll $MINGW_PREFIX/bin/
+    - cp capsimg/CAPSImg/capsimg.dll.a $MINGW_PREFIX/lib/
+    - mkdir -p $MINGW_PREFIX/include/caps
+    - cp capsimg/LibIPF/* capsimg/Core/CommonTypes.h $MINGW_PREFIX/include/caps
+
+    # Prepare PortMidi library
+    - if [ ! -d portmidi ]; then
+        git clone https://github.com/PortMidi/portmidi.git
+            --shallow-since=2025-01-01 -c advice.detachedHead=false &&
+        cd portmidi &&
+        git checkout v2.0.8 &&
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../cmake/Toolchain-mingw32-win64_32.cmake . &&
+        make -j$(nproc) &&
+        cd .. ;
+      fi
+    - cp portmidi/libportmidi.dll $MINGW_PREFIX/bin/
+    - cp portmidi/libportmidi.dll.a $MINGW_PREFIX/lib/
+    - cp -v portmidi/pm_common/*.h $MINGW_PREFIX/include/
+
+    # Now build Hatari
+    - mkdir ../build
+    - cd ../build
+    - VERSION=$(git describe)
+    - cmake -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchain-mingw32-win64_32.cmake
+            -DENABLE_WERROR:BOOL=1 -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo ..
+    - make -j$(nproc)
+    - cd ..
+
+    # And finally create the package
+    - mkdir hatari-$VERSION
+    - mv build/src/hatari.exe gpl.txt readme.txt hatari-$VERSION/
+    - cp -r doc hatari-$VERSION/
+    - cd hatari-$VERSION/doc
+    - rm CMakeLists.txt hatari.1 hatari-ui.html release-checklist.txt
+    - rm -r de fr doxygen
+    - cd ../..
+    - DLLS=(SDL2.dll capsimg.dll zlib1.dll libpng16-16.dll libwinpthread-1.dll
+            libstdc++-6.dll libgcc_s_dw2-1.dll
+            libarchive-13.dll libbz2-1.dll iconv.dll liblzma-5.dll libxml2-2.dll libnettle-8.dll)
+    - cp ${DLLS[@]/#/\/usr\/$MINGW_TARGET\/sys-root\/mingw\/bin\//}
+         hatari-$VERSION/
+    - cp libs/capsimg/LICENCE.txt hatari-$VERSION/capsimg-license.txt
+    - cp libs/portmidi/license.txt hatari-$VERSION/portmidi-license.txt
+    - zip -r hatari-$VERSION-win32.zip hatari-$VERSION/
+  artifacts:
+    paths:
+      - ./*.zip
+
 build-fedora:
-  image: fedora:latest
+  image: fedora:41
   variables:
     GIT_DEPTH: 1000
   before_script:
     - dnf update -y
     - dnf install -y cmake make gcc diffutils python-unversioned-command
-          capstone-devel GraphicsMagick SDL2-devel libpng-devel zlib-devel tidy
-          python3-gobject gtk3 readline-devel man git rpmdevtools
+          capstone-devel GraphicsMagick SDL3-devel libpng-devel zlib-devel tidy
+          python3-gobject gtk3 readline-devel man git rpmdevtools libarchive-devel
   script:
     - rpmdev-setuptree
     - VERSION=$(git describe | sed -e s,-,^, -e s,-,.,)

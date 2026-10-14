@@ -212,29 +212,10 @@ configure the buttons included to the top / bottom / left / right
 of the Hatari screen though.</p>
 
 <p>Hatari UI with the About dialog open:</p>
-<img alt="Hatari UI" src="images/hatari-ui-0.9.png">
+<img alt="Hatari UI" src="images/hatari-ui-1.4.png">
 
 <p>Options:<pre>
-hatari-ui.py --embed --right "about,|,run,pause,forward,|,reset,|,quit"
-</pre>
-
-
-<h3>Screenshots for older versions</h3>
-
-<p>While the older UI is bit different, these option examples and their
-screenshots show how to specify elements and their layout for the
-Hatari Python UI.
-
-<p>Hatari UI with the About dialog open:</p>
-<img alt="Hatari UI" src="images/hatari-ui-0.7.png">
-
-<p>Options:</p>
-<pre>
-hatari-ui.py --embed
---top "about,run,pause,reset,screenshot,setup,quit"
---panel "Input,..."
---panel "Speed settings,..."
---bottom "debug,trace,peripherals,Speed settings,Input"
+hatariui.py --embed --right "about,|,run,pause,forward,|,reset,|,quit"
 </pre>
 
 <hr>
@@ -244,12 +225,12 @@ hatari-ui.py --embed
 
 <p>Options:</p>
 <pre>
-hatari-ui.py
+hatariui.py
 --top "about,run,pause,quit"
---panel "Function keys,..."
---panel "Other keys,..."
---right "setup,debug,trace,Function keys,Other keys"
---bottom "sound,spec512,|,fastforward,|,frameskip"
+--panel "Function keys,F1=59,F2=60,F3=61,F4=62"
+--panel "Other keys,Undo=97,Help=98,Return=26"
+--right "debug,trace,Function keys,Other keys"
+--bottom "sound,|,harddisk,|,forward"
 </pre>
 
 <hr>

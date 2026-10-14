@@ -44,15 +44,17 @@ extern char *Str_Dup(const char *str);
 extern long Str_Copy(char *pDest, const char *pSrc, long nBufLen);
 extern char *Str_Trunc(char *str);
 extern bool Str_IsHex(const char *str);
+extern uint8_t *Str_FindInMem(const char *pString , uint8_t *Mem , int MemLen);
 extern void Str_UnEscape(char *str);
 extern void Str_Dump_Hex_Ascii ( char *p , int Len , int Width , const char *Suffix , FILE *pFile );
 
 /* Interface of character set conversions */
+extern bool Str_Filename_Invalid_Char(const char *name, int offset);
 extern void Str_Filename_Host2Atari(const char *source, char *dest);
 extern void Str_Filename_Atari2Host(const char *source, char *dest, int destLen, char replacementChar);
-extern bool Str_AtariToHost(const char *source, char *dest, int destLen, char replacementChar);
 extern bool Str_HostToAtari(const char *source, char *dest, char replacementChar);
 extern void Str_DecomposedToPrecomposedUtf8(const char *source, char *dest);
+extern void Str_PrintMemChar(FILE *fp, uint8_t c);
 
 /* Setup for string conversions */
 extern void Str_Init(void);

@@ -19,10 +19,12 @@
 
 #define DRIVESOUND
 #define GFXFILTER
+
 #if defined(_M_ARM64) || defined(_M_ARM64EC)
 #define __arm__
 #define MSVC_LONG_DOUBLE
 #else
+#define SUPPORT_LONG_DOUBLE
 #define X86_MSVC_ASSEMBLY
 //#define OPTIMIZED_FLAGS
 #define MSVC_LONG_DOUBLE
@@ -30,6 +32,7 @@
 #define __i386__
 #endif
 #endif
+
 #define WINDOWS
 #define ZLIB_WINAPI
 #define PACKAGE_STRING "WinUAE"
@@ -39,10 +42,8 @@
 
 #ifndef UAE_MINI
 
-#if !defined(_M_ARM64) && !defined(_M_ARM64EC) && !defined(__aarch64__)
 //#define JIT /* JIT compiler support */
 //#define USE_JIT_FPU
-#endif
 
 #define DEBUGGER
 //#define GDBSERVER

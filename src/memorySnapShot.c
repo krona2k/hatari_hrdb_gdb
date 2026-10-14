@@ -23,13 +23,16 @@ const char MemorySnapShot_fileid[] = "Hatari memorySnapShot.c";
 #include "main.h"
 #include "blitter.h"
 #include "configuration.h"
+#include "conv_gen.h"
 #include "debugui.h"
 #include "dmaSnd.h"
 #include "fdc.h"
 #include "file.h"
 #include "floppy.h"
-#include "floppy_ipf.h"
-#include "floppy_stx.h"
+#include "floppies/ipf.h"
+#include "floppies/stx.h"
+#include "floppies/scp.h"
+#include "floppies/kfs.h"
 #include "gemdos.h"
 #include "acia.h"
 #include "ikbd.h"
@@ -50,7 +53,6 @@ const char MemorySnapShot_fileid[] = "Hatari memorySnapShot.c";
 #include "scu_vme.h"
 #include "tos.h"
 #include "screen.h"
-#include "screenConvert.h"
 #include "video.h"
 #include "falcon/dsp.h"
 #include "falcon/crossbar.h"
@@ -59,7 +61,7 @@ const char MemorySnapShot_fileid[] = "Hatari memorySnapShot.c";
 #include "hatari-glue.h"
 
 
-#define VERSION_STRING      "2.6.1"   /* Version number of compatible memory snapshots - Always 6 bytes (inc' NULL) */
+#define VERSION_STRING      "devel"   /* Version number of compatible memory snapshots - Always 6 bytes (inc' NULL) */
 #define SNAPSHOT_MAGIC      0xDeadBeef
 
 #if HAVE_LIBZ
@@ -347,6 +349,8 @@ void MemorySnapShot_Capture_Do(void)
 		Floppy_MemorySnapShot_Capture(true);
 		IPF_MemorySnapShot_Capture(true);			/* After fdc/floppy are saved */
 		STX_MemorySnapShot_Capture(true);			/* After fdc/floppy are saved */
+		SCP_MemorySnapShot_Capture(true);			/* After fdc/floppy are saved */
+		KFS_MemorySnapShot_Capture(true);			/* After fdc/floppy are saved */
 		GemDOS_MemorySnapShot_Capture(true);
 		ACIA_MemorySnapShot_Capture(true);
 		IKBD_MemorySnapShot_Capture(true);
@@ -364,7 +368,7 @@ void MemorySnapShot_Capture_Do(void)
 		DSP_MemorySnapShot_Capture(true);
 		DebugUI_MemorySnapShot_Capture(Temp_FileName, true);
 		IoMem_MemorySnapShot_Capture(true);
-		ScreenConv_MemorySnapShot_Capture(true);
+		ConvGen_MemorySnapShot_Capture(true);
 		SCC_MemorySnapShot_Capture(true);
 		SCU_MemorySnapShot_Capture(true);
 
@@ -441,6 +445,8 @@ void MemorySnapShot_Restore_Do(void)
 		Floppy_MemorySnapShot_Capture(false);
 		IPF_MemorySnapShot_Capture(false);			/* After fdc/floppy are restored, as IPF depends on them */
 		STX_MemorySnapShot_Capture(false);			/* After fdc/floppy are restored, as STX depends on them */
+		SCP_MemorySnapShot_Capture(false);			/* After fdc/floppy are restored, as SCP depends on them */
+		KFS_MemorySnapShot_Capture(false);			/* After fdc/floppy are restored, as KFS depends on them */
 		GemDOS_MemorySnapShot_Capture(false);
 		ACIA_MemorySnapShot_Capture(false);
 		IKBD_MemorySnapShot_Capture(false);			/* After ACIA */
@@ -458,7 +464,7 @@ void MemorySnapShot_Restore_Do(void)
 		DSP_MemorySnapShot_Capture(false);
 		DebugUI_MemorySnapShot_Capture(Temp_FileName, false);
 		IoMem_MemorySnapShot_Capture(false);
-		ScreenConv_MemorySnapShot_Capture(false);
+		ConvGen_MemorySnapShot_Capture(false);
 		SCC_MemorySnapShot_Capture(false);
 		SCU_MemorySnapShot_Capture(false);
 

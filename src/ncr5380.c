@@ -489,6 +489,14 @@ static bool scsi_emulate_analyze (struct scsi_data *sd)
 			sd->direction = 0;
 		}
 		return true;
+	case 0x15: // MODE SELECT (6)
+	case 0x55: // MODE SELECT (10)
+		if (cmd_len == 6) {
+			data_len = sd->cmd[4];
+		} else {
+			data_len = (sd->cmd[7] << 8) | sd->cmd[8];
+		}
+	break;
 	}
 	if (data_len < 0) {
 		if (cmd_len == 6) {
@@ -894,6 +902,8 @@ static uae_u8 ncr5380_bget(struct soft_scsi *scsi, int reg)
 		scsi->irq = false;
 		if (Config_IsMachineFalcon())
 			FDC_ClearIRQ();
+		else if (Config_IsMachineTT())
+			MFP_GPIP_Set_Line_Input ( pMFP_TT , MFP_TT_GPIP_LINE_SCSI_NCR , MFP_GPIP_STATE_LOW );
 		break;
 		case 8: // fake dma port
 		v = raw_scsi_get_data(r, true);
@@ -964,6 +974,13 @@ void ncr5380_bput(struct soft_scsi *scsi, int reg, uae_u8 v)
 			scsi->dma_direction = 0;
 			scsi->dma_active = false;
 			scsi->dma_drq = false;
+		} else if (!(old & 2)) {
+			/* DMA mode just enabled: if the target has already moved
+			 * to a phase other than the one in the TCR, the real chip
+			 * raises the phase-mismatch interrupt at once. Atari
+			 * System V arms DMA mode after the command phase and
+			 * SLEEPS for exactly this interrupt. */
+			ncr5380_check_phase(scsi);
 		}
 		break;
 		case 5:
@@ -1060,12 +1077,7 @@ void Ncr5380_UnInit(void)
 
 	for (i = 0; i < MAX_SCSI_DEVS; i++)
 	{
-		if (!ScsiBus.devs[i].enabled)
-			continue;
-		File_UnLock(ScsiBus.devs[i].image_file);
-		fclose(ScsiBus.devs[i].image_file);
-		ScsiBus.devs[i].image_file = NULL;
-		ScsiBus.devs[i].enabled = false;
+		HDC_UnInitDevice(&ScsiBus.devs[i]);
 	}
 	free(ScsiBus.buffer);
 	ScsiBus.buffer = NULL;

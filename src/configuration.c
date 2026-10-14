@@ -11,20 +11,20 @@
 */
 const char Configuration_fileid[] = "Hatari configuration.c";
 
-#include <SDL_keyboard.h>
-#include <SDL_joystick.h>
-
 #include "main.h"
 #include "configuration.h"
+#include "conv_st.h"
 #include "cfgopts.h"
 #include "audio.h"
 #include "sound.h"
 #include "file.h"
+#include "joy_ui.h"
+#include "keymap.h"
+#include "lilo.h"
 #include "log.h"
 #include "m68000.h"
 #include "memorySnapShot.h"
 #include "paths.h"
-#include "screen.h"
 #include "statusbar.h"
 #include "vdi.h"
 #include "video.h"
@@ -34,7 +34,6 @@ const char Configuration_fileid[] = "Hatari configuration.c";
 #include "disasm.h"
 #include "fdc.h"
 #include "dsp.h"
-#include "joy.h"
 #include "falcon/crossbar.h"
 #include "stMemory.h"
 #include "tos.h"
@@ -69,8 +68,9 @@ static const struct Config_Tag configs_Debugger[] =
 	{ "nBacktraceLines", Int_Tag, &ConfigureParams.Debugger.nBacktraceLines },
 	{ "nExceptionDebugMask", Int_Tag, &ConfigureParams.Debugger.nExceptionDebugMask },
 	{ "nDisasmOptions", Int_Tag, &ConfigureParams.Debugger.nDisasmOptions },
+	{ "nMemConvLocale", Bool_Tag, &ConfigureParams.Debugger.bMemConvLocale },
 	{ "bDisasmUAE", Bool_Tag, &ConfigureParams.Debugger.bDisasmUAE },
-	{ "bSymbolsAutoLoad", Bool_Tag, &ConfigureParams.Debugger.bSymbolsAutoLoad },
+	{ "nSymbolsAutoLoad", Int_Tag, &ConfigureParams.Debugger.nSymbolsAutoLoad },
 	{ "bMatchAllSymbols", Bool_Tag, &ConfigureParams.Debugger.bMatchAllSymbols },
 	{ NULL , Error_Tag, NULL }
 };
@@ -397,27 +397,35 @@ static const struct Config_Tag configs_Acsi[] =
 	{ "bUseDevice0", Bool_Tag, &ConfigureParams.Acsi[0].bUseDevice },
 	{ "sDeviceFile0", String_Tag, ConfigureParams.Acsi[0].sDeviceFile },
 	{ "nBlockSize0", Int_Tag, &ConfigureParams.Acsi[0].nBlockSize },
+	{ "nAcsiVersion0", Int_Tag, &ConfigureParams.Acsi[0].nScsiVersion },
 	{ "bUseDevice1", Bool_Tag, &ConfigureParams.Acsi[1].bUseDevice },
 	{ "sDeviceFile1", String_Tag, ConfigureParams.Acsi[1].sDeviceFile },
 	{ "nBlockSize1", Int_Tag, &ConfigureParams.Acsi[1].nBlockSize },
+	{ "nAcsiVersion1", Int_Tag, &ConfigureParams.Acsi[1].nScsiVersion },
 	{ "bUseDevice2", Bool_Tag, &ConfigureParams.Acsi[2].bUseDevice },
 	{ "sDeviceFile2", String_Tag, ConfigureParams.Acsi[2].sDeviceFile },
 	{ "nBlockSize2", Int_Tag, &ConfigureParams.Acsi[2].nBlockSize },
+	{ "nAcsiVersion2", Int_Tag, &ConfigureParams.Acsi[2].nScsiVersion },
 	{ "bUseDevice3", Bool_Tag, &ConfigureParams.Acsi[3].bUseDevice },
 	{ "sDeviceFile3", String_Tag, ConfigureParams.Acsi[3].sDeviceFile },
 	{ "nBlockSize3", Int_Tag, &ConfigureParams.Acsi[3].nBlockSize },
+	{ "nAcsiVersion3", Int_Tag, &ConfigureParams.Acsi[3].nScsiVersion },
 	{ "bUseDevice4", Bool_Tag, &ConfigureParams.Acsi[4].bUseDevice },
 	{ "sDeviceFile4", String_Tag, ConfigureParams.Acsi[4].sDeviceFile },
 	{ "nBlockSize4", Int_Tag, &ConfigureParams.Acsi[4].nBlockSize },
+	{ "nAcsiVersion4", Int_Tag, &ConfigureParams.Acsi[4].nScsiVersion },
 	{ "bUseDevice5", Bool_Tag, &ConfigureParams.Acsi[5].bUseDevice },
 	{ "sDeviceFile5", String_Tag, ConfigureParams.Acsi[5].sDeviceFile },
 	{ "nBlockSize5", Int_Tag, &ConfigureParams.Acsi[5].nBlockSize },
+	{ "nAcsiVersion5", Int_Tag, &ConfigureParams.Acsi[5].nScsiVersion },
 	{ "bUseDevice6", Bool_Tag, &ConfigureParams.Acsi[6].bUseDevice },
 	{ "sDeviceFile6", String_Tag, ConfigureParams.Acsi[6].sDeviceFile },
 	{ "nBlockSize6", Int_Tag, &ConfigureParams.Acsi[6].nBlockSize },
+	{ "nAcsiVersion6", Int_Tag, &ConfigureParams.Acsi[6].nScsiVersion },
 	{ "bUseDevice7", Bool_Tag, &ConfigureParams.Acsi[7].bUseDevice },
 	{ "sDeviceFile7", String_Tag, ConfigureParams.Acsi[7].sDeviceFile },
 	{ "nBlockSize7", Int_Tag, &ConfigureParams.Acsi[7].nBlockSize },
+	{ "nAcsiVersion7", Int_Tag, &ConfigureParams.Acsi[7].nScsiVersion },
 	{ NULL , Error_Tag, NULL }
 };
 
@@ -610,10 +618,11 @@ void Configuration_SetDefault(void)
 	ConfigureParams.Debugger.nDisasmLines = -1; /* <0: use terminal size */
 	ConfigureParams.Debugger.nBacktraceLines = 0; /* <=0: show all */
 	ConfigureParams.Debugger.nExceptionDebugMask = DEFAULT_EXCEPTIONS;
+	ConfigureParams.Debugger.nSymbolsAutoLoad = SYM_AUTOLOAD_DEBUGGER;
+	ConfigureParams.Debugger.bMatchAllSymbols = false;
 	/* external one has nicer output, but isn't as complete as UAE one */
 	ConfigureParams.Debugger.bDisasmUAE = true;
-	ConfigureParams.Debugger.bSymbolsAutoLoad = true;
-	ConfigureParams.Debugger.bMatchAllSymbols = false;
+	ConfigureParams.Debugger.bMemConvLocale = false;
 	ConfigureParams.Debugger.nDisasmOptions = Disasm_GetOptions();
 	Disasm_Init();
 
@@ -660,6 +669,7 @@ void Configuration_SetDefault(void)
 		ConfigureParams.Acsi[i].bUseDevice = false;
 		strcpy(ConfigureParams.Acsi[i].sDeviceFile, psWorkingDir);
 		ConfigureParams.Acsi[i].nBlockSize = 512;
+		ConfigureParams.Acsi[i].nScsiVersion = 1;
 	}
 	/* SCSI */
 	for (i = 0; i < MAX_SCSI_DEVS; i++)
@@ -679,7 +689,7 @@ void Configuration_SetDefault(void)
 	}
 
 	/* Set defaults for Joysticks */
-	maxjoy = Joy_GetMaxId();
+	maxjoy = JoyUI_GetMaxId();
 	for (i = 0; i < JOYSTICK_COUNT; i++)
 	{
 		ConfigureParams.Joysticks.Joy[i].nJoystickMode = JOYSTICK_DISABLED;
@@ -688,23 +698,10 @@ void Configuration_SetDefault(void)
 		ConfigureParams.Joysticks.Joy[i].nJoyId = (i > maxjoy ? maxjoy : i);
 		for (int j = 0; j < JOYSTICK_BUTTONS; j++)
 			ConfigureParams.Joysticks.Joy[i].nJoyButMap[j] = j;
-		ConfigureParams.Joysticks.Joy[i].nKeyCodeUp = SDLK_UP;
-		ConfigureParams.Joysticks.Joy[i].nKeyCodeDown = SDLK_DOWN;
-		ConfigureParams.Joysticks.Joy[i].nKeyCodeLeft = SDLK_LEFT;
-		ConfigureParams.Joysticks.Joy[i].nKeyCodeRight = SDLK_RIGHT;
-		ConfigureParams.Joysticks.Joy[i].nKeyCodeFire = SDLK_RCTRL;
+		JoyUI_SetDefaultKeys(i);
 	}
 
-	for (i = 0; i <= 9; i++)
-		ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodeNum[i] = SDLK_0 + i;
-	ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodeB = SDLK_b;
-	ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodeC = SDLK_c;
-	ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodeOption = SDLK_o;
-	ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodePause = SDLK_p;
-	ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodeHash = SDLK_HASH;
-	ConfigureParams.Joysticks.Joy[JOYID_JOYPADA].nKeyCodeStar = SDLK_PLUS;
-
-	if (SDL_NumJoysticks() > 0)
+	if (JoyUI_NumJoysticks() > 0)
 	{
 		/* ST Joystick #1 is default joystick */
 		ConfigureParams.Joysticks.Joy[1].nJoyId = 0;
@@ -722,32 +719,7 @@ void Configuration_SetDefault(void)
 	strcpy(ConfigureParams.Keyboard.szMappingFileName, "");
 
 	/* Set defaults for Shortcuts */
-	ConfigureParams.Shortcut.withoutModifier[SHORTCUT_OPTIONS] = SDLK_F12;
-	ConfigureParams.Shortcut.withoutModifier[SHORTCUT_FULLSCREEN] = SDLK_F11;
-	ConfigureParams.Shortcut.withoutModifier[SHORTCUT_PAUSE] = SDLK_PAUSE;
-
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_DEBUG] = SDLK_PAUSE;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_OPTIONS] = SDLK_o;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_FULLSCREEN] = SDLK_f;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_BORDERS] = SDLK_b;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_MOUSEGRAB] = SDLK_m;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_COLDRESET] = SDLK_c;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_WARMRESET] = SDLK_r;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_SCREENSHOT] = SDLK_g;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_BOSSKEY] = SDLK_i;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_CURSOREMU] = SDLK_j;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_FASTFORWARD] = SDLK_x;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_RECANIM] = SDLK_a;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_RECSOUND] = SDLK_y;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_SOUND] = SDLK_s;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_QUIT] = SDLK_q;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_LOADMEM] = SDLK_l;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_SAVEMEM] = SDLK_k;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_INSERTDISKA] = SDLK_d;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_JOY_0] = SDLK_F1;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_JOY_1] = SDLK_F2;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_PAD_A] = SDLK_F3;
-	ConfigureParams.Shortcut.withModifier[SHORTCUT_PAD_B] = SDLK_F4;
+	Keymap_InitShortcutDefaultKeys();
 
 	/* Set defaults for Memory */
 	ConfigureParams.Memory.STRamSize_KB = 1024;	/* 1 MiB */
@@ -884,7 +856,8 @@ void Configuration_SetDefault(void)
 	ConfigureParams.Video.AviRecordFps = 0;			/* automatic FPS */
 	File_MakePathBuf(ConfigureParams.Video.AviRecordFile,
 	                 sizeof(ConfigureParams.Video.AviRecordFile),
-	                 psWorkingDir, "hatari", "avi");
+	                 Configuration_GetScreenShotDir(),
+			 "hatari", "avi");
 
 	/* Initialize the configuration file name */
 	if (File_MakePathBuf(sConfigFileName, sizeof(sConfigFileName),
@@ -955,7 +928,7 @@ void Configuration_Apply(bool bReset)
 		SdlAudioBufferSize = 100;		/* max of 100 ms */
 
 	/* Set playback frequency */
-	Audio_SetOutputAudioFreq(ConfigureParams.Sound.nPlaybackFreq);
+	Sound_SetOutputAudioFreq(ConfigureParams.Sound.nPlaybackFreq);
 
 	/* YM Mixing */
 	if ( ( ConfigureParams.Sound.YmVolumeMixing != YM_LINEAR_MIXING )
@@ -1095,6 +1068,7 @@ void Configuration_Load(const char *psFileName)
 		Log_Printf(LOG_DEBUG, "Configuration file %s not found.\n", psFileName);
 		return;
 	}
+	Log_Printf(LOG_DEBUG, "Loading configuration from: %s\n", psFileName);
 
 	/* Try to load information from old config files */
 	nOldMachineType = -1;
@@ -1298,6 +1272,20 @@ void Configuration_MemorySnapShot_Capture(bool bSave)
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Return pointer to screenshot directory string, either a user configured
+ * override directory, or the default (Hatari/OS) screenshot directory.
+ */
+const char* Configuration_GetScreenShotDir(void)
+{
+	if (ConfigureParams.Screen.szScreenShotDir[0])
+		return ConfigureParams.Screen.szScreenShotDir;
+	/* use default */
+	return Paths_GetDefaultScreenShotDir();
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * This function should be called each time the CPU freq is changed.
  * It will update the main configuration, as well as the corresponding
  * value for nCpuFreqShift
@@ -1336,6 +1324,207 @@ void Configuration_ChangeCpuFreq ( int CpuFreq_new )
 		M68000_ChangeCpuFreq();
 	}
 }
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Write given 'more' string to 'buffer' and return new end of 'buffer'
+ */
+static char *Configuration_AddInfo(char *buffer, const char *more)
+{
+	if (!more)
+		return buffer;
+	while (*more)
+		*buffer++ = *more++;
+	return buffer;
+}
+
+/**
+ * Write Hatari configuration info string to provided buffer,
+ * used by profiler and statusbar.
+ * Returns number of written chars.
+ */
+int Configuration_SetInfoString(char *buffer, int len)
+{
+	int size;
+	char *end;
+
+	/* Output needs to fit into statusbar, so max this
+	 * currently writes is about 75 chars
+	 */
+	assert(len >= 80);
+	end = buffer;
+
+	/* CPU MHz */
+	if (ConfigureParams.System.nCpuFreq > 9)
+	{
+		*end++ = '0' + ConfigureParams.System.nCpuFreq / 10;
+	}
+	*end++ = '0' + ConfigureParams.System.nCpuFreq % 10;
+	end = Configuration_AddInfo(end, "MHz");
+
+	/* CPU type */
+	if(ConfigureParams.System.nCpuLevel > 0)
+	{
+		*end++ = '/';
+		*end++ = '0';
+		if ( ConfigureParams.System.nCpuLevel == 5 )	/* Special case : 68060 has nCpuLevel=5 */
+			*end++ = '0' + 6;
+		else
+			*end++ = '0' + ConfigureParams.System.nCpuLevel % 10;
+		*end++ = '0';
+	}
+
+	const char *mode = NULL;
+	bool cache = ConfigureParams.System.bCpuDataCache && ConfigureParams.System.nCpuLevel > 2;
+	/* Prefetch / cycle exact mode and data cache? */
+	if ( ConfigureParams.System.bCycleExactCpu )
+		mode = cache ? "(CED)" : "(CE)";
+	else if ( ConfigureParams.System.bCompatibleCpu )
+		mode = cache ? "(PFD)" : "(PF)";
+	else if (cache)
+		mode = "(D)";
+	end = Configuration_AddInfo(end, mode);
+
+	/* additional WinUAE CPU/FPU info */
+	*end++ = '/';
+	switch (ConfigureParams.System.n_FPUType)
+	{
+	case FPU_68881:
+		end = Configuration_AddInfo(end, "68881");
+		break;
+	case FPU_68882:
+		end = Configuration_AddInfo(end, "68882");
+		break;
+	case FPU_CPU:
+		end = ( ConfigureParams.System.nCpuLevel == 5 ?
+			Configuration_AddInfo(end, "060") :
+			Configuration_AddInfo(end, "040") );
+		break;
+	default:
+		*end++ = '-';
+	}
+	if (ConfigureParams.System.bSoftFloatFPU && ConfigureParams.System.n_FPUType != FPU_NONE)
+	{
+		end = Configuration_AddInfo(end, "(SF)");
+	}
+	if (ConfigureParams.System.bMMU)
+	{
+		end = Configuration_AddInfo(end, "/MMU");
+	}
+
+	/* amount of memory in MB */
+	*end++ = ' ';
+	size = ConfigureParams.Memory.STRamSize_KB;
+	end += sprintf(end, "%d", size / 1024);
+	if ( size % 1024 == 256 )
+		end += sprintf(end, ".25");
+	else if ( size % 1024 == 512 )
+		end += sprintf(end, ".5");
+
+	if (TTmemory && ConfigureParams.Memory.TTRamSize_KB)
+	{
+		end += sprintf(end, "/%i", ConfigureParams.Memory.TTRamSize_KB/1024);
+	}
+	end = Configuration_AddInfo(end, "MB ");
+
+	/* machine type */
+	switch (ConfigureParams.System.nMachineType)
+	{
+	case MACHINE_ST:
+		end = Configuration_AddInfo(end, "ST(");
+		end = Configuration_AddInfo(end, Video_GetTimings_Name());
+		*end++ = ')';
+		break;
+	case MACHINE_MEGA_ST:
+		end = Configuration_AddInfo(end, "MegaST");
+		break;
+	case MACHINE_STE:
+		end = Configuration_AddInfo(end, "STE");
+		break;
+	case MACHINE_MEGA_STE:
+		end = Configuration_AddInfo(end, "MegaSTE");
+		break;
+	case MACHINE_TT:
+		end = Configuration_AddInfo(end, "TT");
+		break;
+	case MACHINE_FALCON:
+		end = Configuration_AddInfo(end, "Falcon");
+		break;
+	default:
+		end = Configuration_AddInfo(end, "???");
+	}
+
+	/* TOS type/version */
+	end = Configuration_AddInfo(end, ", ");
+	if (bIsEmuTOS)
+	{
+		if (EmuTosVersion > 0)
+		{
+			char str[20];
+			snprintf(str, sizeof(str), "EmuTOS %d.%d.%d",
+			         EmuTosVersion >> 24, (EmuTosVersion >> 16) & 0xff,
+			         (EmuTosVersion >> 8) & 0xff);
+			end = Configuration_AddInfo(end, str);
+			if (EmuTosVersion & 0xff)
+				end = Configuration_AddInfo(end, "+");
+		}
+		else
+		{
+			end = Configuration_AddInfo(end, "EmuTOS");
+		}
+	}
+	else if (bUseLilo)
+	{
+		end = Configuration_AddInfo(end, "Linux");
+	}
+	else
+	{
+		end = Configuration_AddInfo(end, "TOS ");
+		*end++ = '0' + ((TosVersion & 0xf00) >> 8);
+		*end++ = '.';
+		*end++ = '0' + ((TosVersion & 0xf0) >> 4);
+		*end++ = '0' + (TosVersion & 0xf);
+	}
+
+	/* monitor type */
+	end = Configuration_AddInfo(end, ", ");
+	if (bUseVDIRes)
+	{
+		end = Configuration_AddInfo(end, "VDI");
+	}
+	else
+	{
+		switch (ConfigureParams.Screen.nMonitorType)
+		{
+		case MONITOR_TYPE_MONO:
+			end = Configuration_AddInfo(end, "MONO");
+			break;
+		case MONITOR_TYPE_RGB:
+			end = Configuration_AddInfo(end, "RGB");
+			break;
+		case MONITOR_TYPE_VGA:
+			/* There were no VGA monitors for the ST/STE */
+			if (Config_IsMachineST() || Config_IsMachineSTE())
+				end = Configuration_AddInfo(end, "RGB");
+			else
+				end = Configuration_AddInfo(end, "VGA");
+			break;
+		case MONITOR_TYPE_TV:
+			end = Configuration_AddInfo(end, "TV");
+			break;
+		default:
+			*end++ = '?';
+		}
+		end += sprintf(end, " %d Hz" , nScreenRefreshRate);
+	}
+
+	*end++ = '\0';
+
+	assert((end -buffer) < len);
+
+	return end - buffer;
+}
+
 
 #ifdef EMSCRIPTEN
 void Configuration_ChangeMemory ( int RamSizeKb )

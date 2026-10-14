@@ -1255,7 +1255,7 @@ static inline void	MegaSTE_Cache_Check_Entries ( const char *txt )
 static bool	MegaSTE_Cache_Addr_Cacheable ( uint32_t addr , int Size , int DoWrite )
 {
 	/* The MegaSTE uses a 68000 with only 24 bits of address, upper 8 bits */
-	/* should be ignored (except if user explicitely forces 32 bits addressing) */
+	/* should be ignored (except if user explicitly forces 32 bits addressing) */
 	if ( ConfigureParams.System.bAddressSpace24 )
 		addr &= 0xFFFFFF;
 

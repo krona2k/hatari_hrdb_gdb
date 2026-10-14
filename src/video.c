@@ -426,15 +426,18 @@
 /*			'Ika I Compofylla' by Newline when running in MegaST mode with 4MB RAM)	*/
 /* 2025/07/17	[NP]	Add support for STE 224 bytes overscan in med res (fix some parts of	*/
 /*			Double Rez Trouble by DHS)						*/
+/* 2026/07/06	[NP]	Add support for STE 232 bytes overscan in low res (new method by DHS)	*/
+/*			(fix He'e Nalu Uhane by DHS)						*/
 
 
 const char Video_fileid[] = "Hatari video.c";
 
-#include <SDL_endian.h>
-
 #include "main.h"
 #include "configuration.h"
+#include "conv_gen.h"
+#include "conv_st.h"
 #include "cycles.h"
+#include "endianswap.h"
 #include "fdc.h"
 #include "cycInt.h"
 #include "ioMem.h"
@@ -445,7 +448,6 @@ const char Video_fileid[] = "Hatari video.c";
 #include "mfp.h"
 #include "printer.h"
 #include "screen.h"
-#include "screenConvert.h"
 #include "screenSnapShot.h"
 #include "shortcut.h"
 #include "sound.h"
@@ -459,11 +461,13 @@ const char Video_fileid[] = "Hatari video.c";
 #include "blitter.h"
 #include "avi_record.h"
 #include "ikbd.h"
-#include "floppy_ipf.h"
+#include "floppies/ipf.h"
 #include "statusbar.h"
+#include "timing.h"
 #include "clocks_timings.h"
 #include "remotedebug.h"
 #include "utils.h"
+#include "falcon/nvram.h"
 
 
 /* The border's mask allows to keep track of all the border tricks		*/
@@ -485,7 +489,7 @@ const char Video_fileid[] = "Hatari video.c";
 #define BORDERMASK_OVERSCAN_MED_RES	0x40	/* some borders were removed and the line is in med res instead of low res */
 #define BORDERMASK_EMPTY_LINE		0x80	/* 60/50 Hz switch prevents the line to start, video counter is not incremented */
 #define BORDERMASK_LEFT_OFF_MED		0x100	/* removal of left border with hi/med res switch -> +26 bytes (for 4 pixels hardware scrolling) */
-#define BORDERMASK_LEFT_OFF_2_STE	0x200	/* shorter removal of left border with hi/lo res switch -> +20 bytes (STE only)*/
+#define BORDERMASK_LEFT_OFF_2_STE	0x200	/* shorter removal of left border with hi/lo res switch -> +20 bytes (STE only) (no stabilizer needed) */
 #define BORDERMASK_BLANK_LINE		0x400	/* 60/50 Hz switch blanks the rest of the line, but video counter is still incremented */
 
 #define BORDERMASK_NO_DE		0x800
@@ -529,7 +533,7 @@ static uint8_t *pVideoRasterDelayed = NULL;	/* Used in STE mode when changing vi
 static uint8_t *pVideoRaster;			/* Pointer to Video raster, after VideoBase in PC address space. Use to copy data on HBL */
 static bool bSteBorderFlag;			/* true when screen width has been switched to 336 (e.g. in Obsession) */
 static int NewSteBorderFlag = -1;		/* New value for next line */
-static bool bTTColorsSync;			/* whether TT colors need conversion to SDL */
+static bool bTTColorsSync;			/* whether TT colors need conversion */
 static int VideoRasterDelayedInc;		/* Number of bytes to add at the end of the current video line */
 
 int TTSpecialVideoMode;				/* TT special video mode */
@@ -1511,6 +1515,8 @@ static uint32_t Video_CalculateAddress ( void )
 
 		if (LineBorderMask & BORDERMASK_LEFT_OFF)
 			CurSize += BORDERBYTES_LEFT;
+		else if ( (LineBorderMask & BORDERMASK_LEFT_OFF_2_STE) && bSteBorderFlag )
+			CurSize += BORDERBYTES_LEFT_2_STE + 8;
 		else if (LineBorderMask & BORDERMASK_LEFT_OFF_2_STE)
 			CurSize += BORDERBYTES_LEFT_2_STE;
 		else if (LineBorderMask & BORDERMASK_LEFT_OFF_2_STE_MED)
@@ -1679,6 +1685,19 @@ static void Video_WriteToGlueRes ( uint8_t Res )
 		/* elsewhere when rendering line on screen */
 		ShifterFrame.ShifterLines[ HblCounterVideo ].DisplayPixelShift = -16;		/* screen is shifted 16 pixels to the left */
 		LOG_TRACE ( TRACE_VIDEO_BORDER_H , "detect remove left 2 med ste\n" );
+	}
+
+	/* On STE, hi/lo switch at 504/4 or 508/4 combined with left border extended by 16 pixels (used in DHS demos) */
+	/* -> display 28 bytes in left border (instead of 20) and allow to reach 232 bytes per line and 416 pixels */
+	if ( ( ShifterFrame.ShifterLines[ HblCounterVideo ].BorderMask & BORDERMASK_LEFT_OFF_2_STE )
+	        && ( Res == 0x00 )
+		&& bSteBorderFlag )
+	{
+		ShifterFrame.ShifterLines[ HblCounterVideo ].DisplayStartCycle = pVideoTiming->Preload_Start_Hi;
+		ShifterFrame.ShifterLines[ HblCounterVideo ].DisplayPixelShift = -8;		/* screen is shifted 8 pixels to the left */
+		LOG_TRACE ( TRACE_VIDEO_BORDER_H , "detect remove left 2 ste + 16 px %d<->%d\n" ,
+			ShifterFrame.ShifterLines[ HblCounterVideo ].DisplayStartCycle ,
+			ShifterFrame.ShifterLines[ HblCounterVideo ].DisplayEndCycle );
 	}
 
 	/* If left border was opened with a hi/med res switch we need to check */
@@ -2310,7 +2329,7 @@ static void Video_Update_Glue_State ( int FrameCycles , int HblCounterVideo , in
 	    if ( ( LineCycles <= pVideoTiming->HDE_On_Hi ) && ( BorderMask & BORDERMASK_LEFT_OFF ) )
 	    {
 	      if ( FreqHz == VIDEO_50HZ )
-		DE_start = pVideoTiming->HDE_On_Low_50;	/* 56 */
+		DE_start = pVideoTiming->HDE_On_Low_50;		/* 56 */
 	      else
 	      {
 		DE_start = pVideoTiming->HDE_On_Low_60;		/* 52 */
@@ -2522,6 +2541,7 @@ static void Video_Update_Glue_State ( int FrameCycles , int HblCounterVideo , in
 	    }
 	    else if ( ( LineCycles == pVideoTiming->HDE_On_Hi ) && ( BorderMask & BORDERMASK_LEFT_OFF ) )
 	    {
+	      /* hi/lo switch at 504/4 or 508/4 used in DHS demos : display 20 bytes in left border */
 	      DE_start = pVideoTiming->Preload_Start_Hi + 16;
 	      BorderMask &= ~BORDERMASK_LEFT_OFF;
 	      BorderMask |= BORDERMASK_LEFT_OFF_2_STE;
@@ -3681,7 +3701,7 @@ static void Video_StoreFirstLinePalette(void)
 	pp2 = (uint16_t *)&IoMem[0xff8240];
 	for (i = 0; i < 16; i++)
 	{
-		HBLPalettes[i] = SDL_SwapBE16(*pp2++);
+		HBLPalettes[i] = be_swap16(*pp2++);
 		if (Config_IsMachineST())
 			HBLPalettes[i] &= 0x777;			/* Force unused "random" bits to 0 */
 	}
@@ -3996,6 +4016,14 @@ static void Video_CopyScreenLineColor(void)
 		if ( LineBorderMask & ( BORDERMASK_LEFT_OFF | BORDERMASK_LEFT_OFF_MED ) )	/* bigger line by 26 bytes on the left */
 		{
 			pVideoRaster += BORDERBYTES_LEFT-SCREENBYTES_LEFT+VideoOffset;
+			video_memcpy ( pSTScreen, pVideoRaster, SCREENBYTES_LEFT );
+			pVideoRaster += SCREENBYTES_LEFT;
+		}
+		else if ( ( LineBorderMask & BORDERMASK_LEFT_OFF_2_STE )	/* bigger line by 20+8 bytes on the left (STE specific) */
+			&& bSteBorderFlag )
+		{
+			/* display 8 extra bytes, all pixels are shown */
+			pVideoRaster += BORDERBYTES_LEFT_2_STE+8 -SCREENBYTES_LEFT+VideoOffset;
 			video_memcpy ( pSTScreen, pVideoRaster, SCREENBYTES_LEFT );
 			pVideoRaster += SCREENBYTES_LEFT;
 		}
@@ -4686,7 +4714,7 @@ static void Video_SetTTPaletteColor(int idx, uint32_t addr)
 	}
 
 	//printf("%d (%x): (%d,%d,%d)\n", idx, addr, r,g,b);
-	Screen_SetPaletteColor(idx, r,g,b);
+	ConvGen_SetPaletteColor(idx, r,g,b);
 }
 
 /**
@@ -4698,15 +4726,15 @@ static int TTPaletteSTBank(void)
 }
 
 /**
- * Convert TT palette to SDL palette
+ * Convert TT palette to host palette
  */
 static void Video_UpdateTTPalette(int bpp)
 {
 	if (TTRes == TT_HIGH_RES || (bUseVDIRes && bpp == 1))
 	{
 		/* Monochrome mode... palette is hardwired (?) */
-		Screen_SetPaletteColor(0, 255, 255, 255);
-		Screen_SetPaletteColor(1, 0, 0, 0);
+		ConvGen_SetPaletteColor(0, 255, 255, 255);
+		ConvGen_SetPaletteColor(1, 0, 0, 0);
 	}
 	else if (bpp == 1)
 	{
@@ -4750,7 +4778,7 @@ bool Video_RenderTTScreen(void)
 	Video_GetTTRes(&width, &height, &bpp);
 	if (TTRes != nPrevTTRes)
 	{
-		Screen_SetGenConvSize(width, height, false);
+		ConvGen_SetSize(width, height, false);
 		nPrevTTRes = TTRes;
 		if (bpp == 1)   /* Assert that mono palette will be used in mono mode */
 			bTTColorsSync = false;
@@ -4763,8 +4791,8 @@ bool Video_RenderTTScreen(void)
 		nPrevTTSpecialVideoMode = TTSpecialVideoMode;
 	}
 
-	return Screen_GenDraw(VideoBase, width, height, bpp, width * bpp / 16,
-	                      0, 0, 0, 0);
+	return ConvGen_Draw(VideoBase, width, height, bpp, width * bpp / 16,
+	                    0, 0, 0, 0);
 }
 
 
@@ -4779,7 +4807,6 @@ static void Video_DrawScreen(void)
 	if (nVBLs % (nFrameSkips+1))
 		return;
 
-	/* Now draw the screen! */
 	if (bUseVDIRes)
 	{
 		if (Config_IsMachineTT() && !bTTColorsSync)
@@ -4790,27 +4817,17 @@ static void Video_DrawScreen(void)
 		{
 			VIDEL_UpdateColors();
 		}
-		Screen_GenDraw(VideoBase, VDIWidth, VDIHeight, VDIPlanes,
-		               VDIWidth * VDIPlanes / 16, 0, 0, 0, 0);
 	}
-	else if (Config_IsMachineFalcon())
-	{
-		VIDEL_renderScreen();
-	}
-	else if (Config_IsMachineTT())
-	{
-		Video_RenderTTScreen();
-	}
-	else
+	else if (!Config_IsMachineTT() && !Config_IsMachineFalcon())
 	{
 		/* Before drawing the screen, ensure all unused lines are cleared to color 0 */
 		/* (this can happen in 60 Hz when hatari is displaying the screen's border) */
 		/* pSTScreen was set during Video_CopyScreenLineColor */
 		if (nHBL < nLastVisibleHbl)
 			memset(pSTScreen, 0, SCREENBYTES_LINE * ( nLastVisibleHbl - nHBL ) );
-
-		Screen_Draw();
 	}
+
+	ConvST_Refresh(false);
 }
 
 
@@ -4967,7 +4984,7 @@ void Video_InterruptHandler_VBL ( void )
 	VBL_ClockCounter -= pVideoTiming->VblVideoCycleOffset << nCpuFreqShift;
 
 	/* Clear any key presses which are due to be de-bounced (held for one ST frame) */
-	Keymap_DebounceAllKeys();
+	IKBD_DebounceAllKeys();
 
 	Video_DrawScreen();
 
@@ -5000,6 +5017,8 @@ void Video_InterruptHandler_VBL ( void )
 
 	/* Update the IKBD's internal clock */
 	IKBD_UpdateClockOnVBL ();
+	/* Update the MC146818/nvram internal clock */
+	NvRam_Clock_Update ();
 
 	/* Record video frame is necessary */
 	if ( Avi_AreWeRecording() )
@@ -5058,7 +5077,7 @@ void Video_InterruptHandler_VBL ( void )
 	if ( quit_program == 0 )
 		M68000_Exception(EXCEPTION_NR_VBLANK, M68000_EXC_SRC_AUTOVEC);	/* Vertical blank interrupt, level 4 */
 
-	Main_WaitOnVbl();
+	Timing_WaitOnVbl();
 }
 
 
@@ -5423,8 +5442,8 @@ static void Video_ColorReg_WriteWord(void)
 	{
 		if (idx == 0)
 		{
-			Screen_SetPaletteColor(col & 1, 0, 0, 0);
-			Screen_SetPaletteColor(!(col & 1), 255, 255, 255);
+			ConvGen_SetPaletteColor(col & 1, 0, 0, 0);
+			ConvGen_SetPaletteColor(!(col & 1), 255, 255, 255);
 		}
 	}
 	else if (bUseVDIRes)
@@ -5439,7 +5458,7 @@ static void Video_ColorReg_WriteWord(void)
 		b = col & 0x0f;
 		b = ((b & 7) << 1) | (b >> 3);
 		b |= b << 4;
-		Screen_SetPaletteColor(idx, r, g, b);
+		ConvGen_SetPaletteColor(idx, r, g, b);
 	}
 	else    /* Don't store if hi-res or VDI resolution */
 	{

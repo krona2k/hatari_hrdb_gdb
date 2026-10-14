@@ -33,7 +33,10 @@ typedef enum {
 /* Callback type to register if remote debugging is enabled */
 typedef bool (*DebugUI_ProcessRemoteCommands)(debug_reason_t reason);
 
-extern void DebugUI_Init(void);
+/* max size for debugger command line input buffers */
+#define MAX_DEBUG_CMD_LEN 4096
+
+//extern void DebugUI_Init(void);
 extern void DebugUI(debug_reason_t reason);
 extern void DebugUI_Exceptions(int nr, long pc);
 extern bool DebugUI_ParseLine(const char *input);

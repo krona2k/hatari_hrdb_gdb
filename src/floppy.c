@@ -29,18 +29,21 @@ const char Floppy_fileid[] = "Hatari floppy.c";
 #include "main.h"
 #include "configuration.h"
 #include "file.h"
+#include "fdc.h"
 #include "floppy.h"
 #include "gemdos.h"
 #include "hdc.h"
 #include "ncr5380.h"
 #include "log.h"
 #include "memorySnapShot.h"
-#include "st.h"
-#include "msa.h"
-#include "dim.h"
-#include "floppy_ipf.h"
-#include "floppy_stx.h"
-#include "zip.h"
+#include "floppies/dim.h"
+#include "floppies/ipf.h"
+#include "floppies/msa.h"
+#include "floppies/st.h"
+#include "floppies/stx.h"
+#include "floppies/scp.h"
+#include "floppies/kfs.h"
+#include "file_archive.h"
 #include "str.h"
 #include "video.h"
 #include "fdc.h"
@@ -62,6 +65,7 @@ static const char * const pszDiskImageNameExts[] =
 	".raw",
 	".ctr",
 	".stx",
+	".scp",
 	NULL
 };
 
@@ -522,6 +526,7 @@ bool Floppy_InsertDiskIntoDrive(int Drive)
 	long	nImageBytes = 0;
 	char	*filename;
 	int	ImageType = FLOPPY_IMAGE_TYPE_NONE;
+	const char *PathInArchive = NULL;
 
 	/* Eject disk, if one is inserted (doesn't inform user) */
 	assert(Drive >= 0 && Drive < MAX_FLOPPYDRIVES);
@@ -549,10 +554,14 @@ bool Floppy_InsertDiskIntoDrive(int Drive)
 		EmulationDrives[Drive].pBuffer = IPF_ReadDisk(Drive, filename, &nImageBytes, &ImageType);
 	else if (STX_FileNameIsSTX(filename, true))
 		EmulationDrives[Drive].pBuffer = STX_ReadDisk(Drive, filename, &nImageBytes, &ImageType);
-	else if (ZIP_FileNameIsZIP(filename))
+	else if (SCP_FileNameIsSCP(filename, true))
+		EmulationDrives[Drive].pBuffer = SCP_ReadDisk(Drive, filename, &nImageBytes, &ImageType);
+	else if (KFS_FileNameIsKFS(filename, true))
+		EmulationDrives[Drive].pBuffer = KFS_ReadDisk(Drive, filename, &nImageBytes, &ImageType);
+	else if (Archive_FileNameIsSupported(filename))
 	{
-		const char *zippath = ConfigureParams.DiskImage.szDiskZipPath[Drive];
-		EmulationDrives[Drive].pBuffer = ZIP_ReadDisk(Drive, filename, zippath, &nImageBytes, &ImageType);
+		PathInArchive = ConfigureParams.DiskImage.szDiskZipPath[Drive];
+		EmulationDrives[Drive].pBuffer = Archive_ReadDisk(Drive, filename, PathInArchive, &nImageBytes, &ImageType);
 	}
 
 	if ( (EmulationDrives[Drive].pBuffer == NULL) || ( ImageType == FLOPPY_IMAGE_TYPE_NONE ) )
@@ -585,6 +594,30 @@ bool Floppy_InsertDiskIntoDrive(int Drive)
 		}
 	}
 
+	/* For SCP, call specific function to handle the inserted image */
+	else if ( ImageType == FLOPPY_IMAGE_TYPE_SCP )
+	{
+		if ( SCP_Insert ( Drive , filename , EmulationDrives[Drive].pBuffer , nImageBytes ) == false )
+		{
+			free ( EmulationDrives[Drive].pBuffer );
+			EmulationDrives[Drive].pBuffer = NULL;
+			Log_AlertDlg(LOG_INFO, "SCP image '%s' loading failed", filename);
+			return false;
+		}
+	}
+
+	/* For Kryoflux streams, call specific function to handle the inserted image */
+	else if ( ImageType == FLOPPY_IMAGE_TYPE_KFS )
+	{
+		if ( KFS_Insert ( Drive , filename , PathInArchive , EmulationDrives[Drive].pBuffer , nImageBytes ) == false )
+		{
+			free ( EmulationDrives[Drive].pBuffer );
+			EmulationDrives[Drive].pBuffer = NULL;
+			Log_AlertDlg(LOG_INFO, "KFS image '%s' loading failed", filename);
+			return false;
+		}
+	}
+
 	/* Store image filename (required for ejecting the disk later!) */
 	strcpy(EmulationDrives[Drive].sFileName, filename);
 
@@ -600,6 +633,10 @@ bool Floppy_InsertDiskIntoDrive(int Drive)
 	else if ( ImageType == FLOPPY_IMAGE_TYPE_STX )
 		EmulationDrives[Drive].bOKToSave = true;
 	else if ( ImageType == FLOPPY_IMAGE_TYPE_IPF )
+		EmulationDrives[Drive].bOKToSave = false;
+	else if ( ImageType == FLOPPY_IMAGE_TYPE_SCP )
+		EmulationDrives[Drive].bOKToSave = false;
+	else if ( ImageType == FLOPPY_IMAGE_TYPE_KFS )
 		EmulationDrives[Drive].bOKToSave = false;
 	else
 		EmulationDrives[Drive].bOKToSave = false;
@@ -646,8 +683,12 @@ bool Floppy_EjectDiskFromDrive(int Drive)
 					bSaved = IPF_WriteDisk(Drive, psFileName, EmulationDrives[Drive].pBuffer, EmulationDrives[Drive].nImageBytes);
 				else if (STX_FileNameIsSTX(psFileName, true))
 					bSaved = STX_WriteDisk(Drive, psFileName, EmulationDrives[Drive].pBuffer, EmulationDrives[Drive].nImageBytes);
-				else if (ZIP_FileNameIsZIP(psFileName))
-					bSaved = ZIP_WriteDisk(Drive, psFileName, EmulationDrives[Drive].pBuffer, EmulationDrives[Drive].nImageBytes);
+				else if (SCP_FileNameIsSCP(psFileName, true))
+					bSaved = SCP_WriteDisk(Drive, psFileName, EmulationDrives[Drive].pBuffer, EmulationDrives[Drive].nImageBytes);
+				else if (KFS_FileNameIsKFS(psFileName, true))
+					bSaved = KFS_WriteDisk(Drive, psFileName, EmulationDrives[Drive].pBuffer, EmulationDrives[Drive].nImageBytes);
+				else if (Archive_FileNameIsSupported(psFileName))
+					bSaved = Archive_WriteDisk(Drive, psFileName, EmulationDrives[Drive].pBuffer, EmulationDrives[Drive].nImageBytes);
 				if (bSaved)
 					Log_Printf(LOG_INFO, "Updated the contents of floppy image '%s'.", psFileName);
 				else
@@ -671,6 +712,12 @@ bool Floppy_EjectDiskFromDrive(int Drive)
 	/* Free data used by this STX image */
 	else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_STX )
 		STX_Eject ( Drive );
+	/* Free data used by this SCP image */
+	else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_SCP )
+		SCP_Eject ( Drive );
+	/* Free data used by this KFS image */
+	else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_KFS )
+		KFS_Eject ( Drive );
 
 
 	/* Drive is now empty */
@@ -977,3 +1024,53 @@ bool Floppy_WriteSectors(int Drive, uint8_t *pBuffer, uint16_t Sector,
 
 	return false;
 }
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * For a given image type, return TRUE if the image is internaly converted
+ * to MFM (eg SCP). Else return false
+ */
+bool	Floppy_ImageIsMFM ( int ImageType )
+{
+	if ( ( ImageType == FLOPPY_IMAGE_TYPE_SCP )
+	  || ( ImageType == FLOPPY_IMAGE_TYPE_KFS ) )
+		return true;
+
+#ifndef HAVE_CAPSIMAGE
+	if (ImageType == FLOPPY_IMAGE_TYPE_IPF)
+		return true;
+#endif
+
+	return false;
+}
+
+/*
+ * Same for STX
+ */
+
+bool	Floppy_ImageIsSTX ( int ImageType )
+{
+	if ( ImageType == FLOPPY_IMAGE_TYPE_STX )
+		return true;
+
+	return false;
+}
+
+
+/*
+ * Same for formats where only sectors' content is stored (ST, MSA, DIM)
+ */
+bool	Floppy_ImageIsST_MSA ( int ImageType )
+{
+	if ( ( ImageType == FLOPPY_IMAGE_TYPE_ST )
+	  || ( ImageType == FLOPPY_IMAGE_TYPE_MSA )
+	  || ( ImageType == FLOPPY_IMAGE_TYPE_DIM ) )
+		return true;
+
+	return false;
+}
+
+
+

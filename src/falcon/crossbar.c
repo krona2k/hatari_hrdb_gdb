@@ -1307,9 +1307,24 @@ void Crossbar_Recalculate_Clocks_Cycles(void)
 		crossbar.isDacMuted = 1;
 
 	if ((crossbar.int_freq_divider == 6) || (crossbar.int_freq_divider == 8) ||
-	    (crossbar.int_freq_divider == 10) || (crossbar.int_freq_divider >= 12)) {
+	    (crossbar.int_freq_divider == 10) || (crossbar.int_freq_divider >= 12))
 		crossbar.isDacMuted = 1;
+
+	if ( crossbar.isDacMuted )
+	{
 		LOG_TRACE(TRACE_CROSSBAR, "           DAC is muted\n");
+
+		/* Clear the DAC ring buffer to avoid sound artifacts (due to previous data in the buffer) */
+		/* when DAC will be un-muted */
+		memset(dac.buffer_left, 0, sizeof(dac.buffer_left));
+		memset(dac.buffer_right, 0, sizeof(dac.buffer_right));
+		dac.readPosition_float = 0;
+		dac.readPosition = 0;
+		dac.writePosition = (dac.readPosition+DACBUFFER_SIZE/2)%DACBUFFER_SIZE;
+	}
+	else
+	{
+		LOG_TRACE(TRACE_CROSSBAR, "           DAC is not muted\n");
 	}
 
 	// Compute Ratio between host computer sound frequency and Hatari's sound frequency.
@@ -1591,6 +1606,8 @@ static void Crossbar_setDmaPlay_Settings(void)
 	dmaPlay.frameLen = dmaPlay.frameEndAddr - dmaPlay.frameStartAddr;  /* TODO: Remove later */
 //	dmaPlay.frameCounter = crossbar.dmaPlay_CurrentFrameCount - crossbar.dmaPlay_CurrentFrameStart;
 	dmaPlay.frameCounter = 0;
+	dmaPlay.currentFrame = 0;						/* 1st frame is left if in stereo */
+//fprintf (stderr , "Crossbar_setDmaPlay_Settings cur_frame %d\n" , dmaPlay.currentFrame );
 
 	if (dmaPlay.frameEndAddr <= dmaPlay.frameStartAddr)
 	{
@@ -1850,11 +1867,11 @@ void Crossbar_DmaRecordInHandShakeMode_Frame(uint32_t frame)
 
 /**
  * Get data recorded by the microphone and convert them into falcon internal frequency
- *    - micro_bufferL : left track recorded by the microphone
- *    - micro_bufferR : right track recorded by the microphone
+ *    - micro_buffer : track recorded by the microphone
+ *                     (interleaved left and right samples)
  *    - microBuffer_size : buffers size
  */
-void Crossbar_GetMicrophoneDatas(int16_t *micro_bufferL, int16_t *micro_bufferR, uint32_t microBuffer_size)
+void Crossbar_EnqueueMicrophoneData(int16_t *micro_buffer, uint32_t microBuffer_size)
 {
 	uint32_t i, size, bufferIndex;
 	int64_t idxPos;
@@ -1866,8 +1883,8 @@ void Crossbar_GetMicrophoneDatas(int16_t *micro_bufferL, int16_t *micro_bufferR,
 	for (i = 0; i < size; i++) {
 		adc.writePosition = (adc.writePosition + 1) % DACBUFFER_SIZE;
 
-		adc.buffer_left[adc.writePosition] = micro_bufferL[bufferIndex];
-		adc.buffer_right[adc.writePosition] = micro_bufferR[bufferIndex];
+		adc.buffer_left[adc.writePosition] = micro_buffer[bufferIndex * 2];
+		adc.buffer_right[adc.writePosition] = micro_buffer[bufferIndex * 2 + 1];
 
 		idxPos += crossbar.frequence_ratio2;
 		bufferIndex += idxPos>>32;

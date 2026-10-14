@@ -65,14 +65,21 @@ set(ENABLE_DSP_EMU 1
 set(ENABLE_TRACING 1
     CACHE BOOL "Enable tracing messages for debugging")
 
-# Run-time checks with GCC / LLVM (Clang) AddressSanitizer:
-# - stack protection
-# - checking of pointer accesses
-#
+find_path(LIBRETRO_INCLUDE_DIR libretro.h
+          PATH_SUFFIXES libretro libretro-common)
+
+if (LIBRETRO_INCLUDE_DIR)
+	set(ENABLE_LIBRETRO 1
+	    CACHE BOOL "Build a core for libretro (experimental)")
+else()
+	set(ENABLE_LIBRETRO 0
+	    CACHE BOOL "Build a core for libretro (experimental)")
+endif(LIBRETRO_INCLUDE_DIR)
+
 # Configure Hatari with AddressSanitizer:
 #   cd build; make clean; cmake -D ENABLE_ASAN:BOOL=1 -D ..
 # If everything's fine, CMake output should include:
-#   Performing Test ASAN_AVAILABLE - Success"
+#  - ASAN : Compiler Address Sanitizer enabled
 #
 # After (re-)building Hatari, run it as following to see
 # available AddressSanitizer options (and that it works):
@@ -80,11 +87,12 @@ set(ENABLE_TRACING 1
 #
 # For more info:
 #   https://github.com/google/sanitizers/wiki/AddressSanitizer
+#   https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html
 #
 CHECK_C_COMPILER_FLAG("-fsanitize=address" ASAN_AVAILABLE)
 if(ASAN_AVAILABLE)
 	set(ENABLE_ASAN 0
-	    CACHE BOOL "Enable GCC/LLVM run-time stack/pointer debugging (~2x slowdown)")
+	    CACHE BOOL "Enable GCC/LLVM run-time address debugging (~2x slowdown)")
 endif(ASAN_AVAILABLE)
 
 CHECK_C_COMPILER_FLAG("-fsanitize=undefined" UBSAN_AVAILABLE)
@@ -92,6 +100,18 @@ if(UBSAN_AVAILABLE)
 	set(ENABLE_UBSAN 0
 	    CACHE BOOL "Enable GCC/LLVM run-time undefined behavior debugging")
 endif(UBSAN_AVAILABLE)
+
+CHECK_C_COMPILER_FLAG("-fstack-protector-all -fsanitize=bounds-strict" SSP_AVAILABLE)
+if(SSP_AVAILABLE)
+	set(ENABLE_SSP 0
+	    CACHE BOOL "Enable GCC/LLVM run-time stack protection")
+endif(SSP_AVAILABLE)
+
+CHECK_C_COMPILER_FLAG("-fhardened" HARDENED_AVAILABLE)
+if(HARDENED_AVAILABLE)
+	set(ENABLE_HARDENED 0
+	    CACHE BOOL "Enable GCC/LLVM run-time hardening options (for production / distros not enabling them by default)")
+endif(HARDENED_AVAILABLE)
 
 find_program(GZIP gzip)
 if(UNIX AND GZIP)
@@ -123,10 +143,22 @@ endif(ENABLE_OSX_BUNDLE)
 # Check for libraries:
 # ####################
 
-find_package(SDL2)
-if(NOT SDL2_FOUND)
-	message(FATAL_ERROR "SDL2 library not found!")
-endif(NOT SDL2_FOUND)
+if(NOT DEFINED ENABLE_SDL3 OR ENABLE_SDL3)
+	find_package(SDL3 QUIET)
+endif()
+if(SDL3_FOUND)
+	# Yes, we're cheating by re-using the SDL2_* variables:
+	set(SDL2_INCLUDE_DIRS ${SDL3_INCLUDE_DIRS})
+	set(SDL2_LIBRARIES ${SDL3_LIBRARIES})
+	set(SDL2_LIBDIR $<TARGET_FILE_DIR:SDL3::SDL3-shared>)
+	set(ENABLE_SDL3 1 CACHE BOOL "Use SDL3 instead of SDL2")
+else()
+	find_package(SDL2)
+	if(NOT SDL2_FOUND)
+		message(FATAL_ERROR "SDL library not found!")
+	endif(NOT SDL2_FOUND)
+	set(ENABLE_SDL3 0 CACHE BOOL "Use SDL3 instead of SDL2")
+endif()
 
 find_package(Math)
 
@@ -140,6 +172,11 @@ if(ZLIB_FOUND)
 	set(HAVE_LIBZ 1)
 	set(HAVE_ZLIB_H 1)
 endif(ZLIB_FOUND)
+
+find_package(LibArchive)
+if(LibArchive_FOUND)
+	set(HAVE_LIBARCHIVE 1)
+endif(LibArchive_FOUND)
 
 find_package(PNG)
 if(PNG_FOUND)
@@ -187,6 +224,10 @@ check_large_file()
 # CPP Definitions:
 # ################
 
+# We still want to have assert() in RelWithDebInfo builds:
+string(REPLACE " -DNDEBUG" ""
+       CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+
 # Test for large file support:
 execute_process(COMMAND getconf LFS_CFLAGS
                 OUTPUT_VARIABLE DETECTED_LFS_CFLAGS
@@ -197,11 +238,13 @@ if(DETECTED_LFS_CFLAGS)
 endif(DETECTED_LFS_CFLAGS)
 
 # Additional CFLAGS suggested by the SDL library:
-if(PKG_CONFIG_FOUND)
+if(NOT SDL3_FOUND)
+    if(PKG_CONFIG_FOUND)
 	execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE} --cflags-only-other sdl2
 			OUTPUT_VARIABLE SDL2_OTHER_CFLAGS
 			ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
-endif(PKG_CONFIG_FOUND)
+    endif(PKG_CONFIG_FOUND)
+endif()
 
 if(ENABLE_OSX_BUNDLE)
 	# Use OSX native alert windows
@@ -219,6 +262,7 @@ endif(MSVC)
 # ###########################
 
 check_include_files(byteswap.h HAVE_BYTESWAP_H)
+check_include_files(dlfcn.h HAVE_DLFCN_H)
 check_include_files(termios.h HAVE_TERMIOS_H)
 check_include_files(sys/ioctl.h HAVE_SYS_IOCTL_H)
 check_include_files(strings.h HAVE_STRINGS_H)
@@ -253,12 +297,8 @@ check_struct_has_member("struct dirent" d_type dirent.h HAVE_DIRENT_D_TYPE)
 # Other CFLAGS:
 # #############
 
-# GCC/Clang stack/pointer debugging (~2x slowdown)
+# GCC/Clang address pointer access debugging (~2x slowdown)
 if(ENABLE_ASAN)
-	# better backtraces
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-omit-frame-pointer")
-	# enable stack protection
-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all")
 	# enable AddressSanitizer with global variable tracking
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fno-common")
 endif(ENABLE_ASAN)
@@ -268,6 +308,24 @@ if(ENABLE_UBSAN)
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined")
 	add_definitions(-DENABLE_UBSAN=1)
 endif(ENABLE_UBSAN)
+
+# GCC/Clang stack protection options (overlaps with HARDENED)
+if(ENABLE_SSP)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all -fsanitize=bounds-strict")
+endif(ENABLE_SSP)
+
+# GCC/Clang production hardening option (overlaps with SSP)
+if(ENABLE_HARDENED)
+	if(ENABLE_SSP)
+		message(FATAL_ERROR "Enabled either HARDENED or SSP, not both!")
+	endif(ENABLE_SSP)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fhardened")
+endif(ENABLE_HARDENED)
+
+# Debug & protection options require better backtraces
+if(ENABLE_ASAN OR ENABLE_SSP OR ENABLE_UBSAN)
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-omit-frame-pointer")
+endif(ENABLE_ASAN OR ENABLE_SSP OR ENABLE_UBSAN)
 
 # GCC/Clang specific flags:
 if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
@@ -431,7 +489,11 @@ Libraries summary :
 -------------------
 ")
 
-message("  - sdl :\tusing SDL2 ${SDL2_VERSION}")
+if(SDL3_FOUND)
+	message("  - sdl :\tusing SDL3 ${SDL3_VERSION}")
+else()
+	message("  - sdl :\tusing SDL2 ${SDL2_VERSION}")
+endif()
 
 if(Readline_FOUND)
   message( "  - readline :\tfound, enables history/completion in the debugger" )
@@ -444,6 +506,12 @@ if(ZLIB_FOUND)
 else()
   message( "  - zlib :\tnot found, install it to use zip/gz files" )
 endif(ZLIB_FOUND)
+
+if(LibArchive_FOUND)
+  message( "  - libarchive:\tfound, allows to use zip/7z/rar/lha/lzh/bz2... files directly" )
+else()
+  message( "  - libarchive:\tnot found, install it to use zip/7z/rar/lha/lzh/bz2... files" )
+endif(LibArchive_FOUND)
 
 if(PNG_FOUND)
   message( "  - png :\tfound, allows to compress screenshot/avi files using png" )
@@ -485,17 +553,74 @@ else()
   message( "  - capstone :\tnot found, install it to use extend disassembly options" )
 endif(Capstone_FOUND)
 
-if (HATARI_HAVE_LFS)
-	message("  - LFS :\tLarge File Support is available (size of off_t = ${SIZEOF_OFF_T}),")
-	message("         \tAVI recording and HD image files can be bigger than 2 GB")
+if(ENABLE_LIBRETRO)
+  message("  - libretro :\tfound (include dir = '${LIBRETRO_INCLUDE_DIR}'),")
+  message("              \tretroarch core will be built")
 else()
-	message("  - LFS :\tLarge File Support is NOT available (size of off_t = ${SIZEOF_OFF_T}),")
-	message("         \tAVI recording and HD image files will be limited to 2 GB")
+  message("  - libretro :\tnot found (libretro.h header missing),")
+  message("              \tretroarch core won't be built")
+endif(ENABLE_LIBRETRO)
+
+# summarize configure options status
+
+message( "
+Hatari / toolchain features support summary :
+---------------------------------------------
+")
+
+# relevant only if enabled
+
+if(ENABLE_OSX_BUNDLE)
+  message("  - OSX_BUNDLE :\tMac application bundling enabled")
+endif(ENABLE_OSX_BUNDLE)
+
+if(ENABLE_ASAN)
+  message("  - ASAN :\tCompiler Address Sanitizer enabled")
+endif(ENABLE_ASAN)
+
+if(ENABLE_UBSAN)
+  message("  - UBSAN :\tCompiler Undefined Behavior Sanitizer enabled")
+endif(ENABLE_UBSAN)
+
+if(ENABLE_SSP)
+  message("  - SSP :\tCompiler stack protections enabled")
+endif(ENABLE_SSP)
+
+if(ENABLE_HARDENED)
+  message("  - HARDENED :\tCompiler hardening options enabled")
+endif(ENABLE_HARDENED)
+
+if(ENABLE_WERROR)
+  message("  - WERROR :\tCompiler warnings treated as errors")
+endif(ENABLE_WERROR)
+
+# Hatari feature status
+
+if(ENABLE_DSP_EMU)
+  message("  - DSP_EMU :\tAtari Falcon DSP emulation support enabled")
+else()
+  message("  - DSP_EMU :\tAtari Falcon DSP emulation support disabled")
+endif(ENABLE_DSP_EMU)
+
+if(ENABLE_TRACING)
+  message("  - TRACING :\tOS call & HW feature tracing support enabled")
+else()
+  message("  - TRACING :\tOS call & HW feature tracing support disabled")
+endif(ENABLE_TRACING)
+
+if(HATARI_HAVE_LFS)
+  message("  - LFS :\tLarge File Support is available (size of off_t = ${SIZEOF_OFF_T})")
+  message("         \t=> AVI recording & HD image sizes can be >2 GiB")
+else()
+  message("  - LFS :\tLarge File Support is NOT available (size of off_t = ${SIZEOF_OFF_T})")
+  message("         \t=> AVI recording & HD image sizes limited to 2 GiB")
 endif()
+
+# relevant only if disabled
 
 if(NOT HAVE_SYS_TIMES_H)
   message("\n  Note: times() function is missing (sys/times.h is not available)")
-  message("        ==> using inaccurate SDL_GetTicks() instead")
+  message("        => using inaccurate SDL_GetTicks() instead")
 endif()
 
 message( "" )
