@@ -302,10 +302,10 @@ private:
 };
 
 //-----------------------------------------------------------------------------
-class HardwareFieldYm : public HardwareField
+class HardwareFieldIntReg : public HardwareField
 {
 public:
-    HardwareFieldYm(int index) :
+    HardwareFieldIntReg(int index) :
         m_index(index)
     {
     }
@@ -356,6 +356,23 @@ public:
 
     bool Update(const TargetModel* pTarget);
     int m_index;
+};
+
+//-----------------------------------------------------------------------------
+class HardwareMfpTimerRate: public HardwareField
+{
+public:
+    enum
+    {
+        kTimerA,
+        kTimerB,
+        kTimerC,
+        kTimerD,
+    };
+    explicit HardwareMfpTimerRate(int timer);
+    bool Update(const TargetModel* pTarget);
+private:
+    int m_timer;
 };
 
 //-----------------------------------------------------------------------------
@@ -585,10 +602,65 @@ bool HardwareFieldAddr::Update(const TargetModel* pTarget)
     return false;
 }
 
-//-----------------------------------------------------------------------------
-bool HardwareFieldYm::Update(const TargetModel* pTarget)
+HardwareMfpTimerRate::HardwareMfpTimerRate(int timer) :
+    m_timer(timer)
+{}
+
+bool HardwareMfpTimerRate::Update(const TargetModel* pTarget)
 {
-    uint8_t val = pTarget->GetYm().m_regs[m_index];
+    m_text = "";
+
+    // Get control and datas
+    static uint32_t ctrls[4] = {HwRegs::kMfpTACR, HwRegs::kMfpTBCR, HwRegs::kMfpTCDCR, HwRegs::kMfpTCDCR};
+    static uint32_t datas[4] = {HwRegs::kMfpTADR, HwRegs::kMfpTBDR, HwRegs::kMfpTCDR, HwRegs::kMfpTDDR};
+
+    const HwRegs& ym = pTarget->GetHwRegs();
+    uint8_t control = ym.m_regs[ctrls[m_timer]];
+    uint8_t data = ym.m_regs[datas[m_timer]];
+
+    // Convert control values to clcoks
+    static uint32_t controlToCycles[16] = { 0, 4, 10, 16, 50, 64, 100, 200, 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint32_t clocks = 0;
+    switch (m_timer)
+    {
+    case kTimerA:
+    {
+        control = (uint32_t) Regs::GetField_MFP_TACR_MODE_TIMER_A(control);
+        break;
+    }
+    case kTimerB:
+    {
+        control = (uint32_t) Regs::GetField_MFP_TBCR_MODE_TIMER_B(control);
+        break;
+    }
+    case kTimerC:
+    {
+        control = (uint32_t) Regs::GetField_MFP_TCDCR_MODE_TIMER_C(control);
+        break;
+    }
+    case kTimerD:
+    {
+        control = (uint32_t) Regs::GetField_MFP_TCDCR_MODE_TIMER_D(control);
+        break;
+    }
+    }
+    clocks = controlToCycles[control];
+
+    if (clocks == 0)
+        return false;
+
+    // Final calculation
+    uint32_t count = data == 0 ? 256: data;
+    count *= clocks;
+    uint32_t rate =  2457600 / count;
+    m_text = QString::asprintf("%uHz", rate);
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+bool HardwareFieldIntReg::Update(const TargetModel* pTarget)
+{
+    uint8_t val = pTarget->GetHwRegs().m_regs[m_index];
     QString str = QString::asprintf("%u ($%x)", val, val);
     m_changed = m_text != str;
     m_text = str;
@@ -598,20 +670,20 @@ bool HardwareFieldYm::Update(const TargetModel* pTarget)
 //-----------------------------------------------------------------------------
 bool HardwareFieldYmPeriod::Update(const TargetModel *pTarget)
 {
-    uint16_t valLo = (pTarget->GetYm().m_regs[m_index]);
-    uint16_t valHi = (pTarget->GetYm().m_regs[m_index + 1]);
+    uint16_t valLo = pTarget->GetHwRegs().m_regs[m_index];
+    uint16_t valHi = pTarget->GetHwRegs().m_regs[m_index + 1];
     uint16_t mask = 0xfff;
     double clock = 2000000.0;
 
     // Divisors are taken from the Datasheet.
     double divisor = clock / 16;
 
-    if (m_index == Regs::YM_PERIOD_ENV_LO)
+    if (m_index == HwRegs::kYmPeriodEnvLo)
     {
         divisor = clock / 256;
-        mask = 0xffff;
+        mask = 0xffff;      // is this correct??
     }
-    else if (m_index == Regs::YM_PERIOD_NOISE)
+    else if (m_index == HwRegs::kYmPeriodNoise)
     {
         mask = 0x1f;
     }
@@ -630,7 +702,7 @@ bool HardwareFieldYmPeriod::Update(const TargetModel *pTarget)
 //-----------------------------------------------------------------------------
 bool HardwareFieldYmEnvShape::Update(const TargetModel *pTarget)
 {
-    uint16_t val = (pTarget->GetYm().m_regs[Regs::YM_PERIOD_ENV_SHAPE]);
+    uint16_t val = (pTarget->GetHwRegs().m_regs[HwRegs::kYmEnvShape]);
     const char* pString = Regs::GetString(static_cast<Regs::ENV_SHAPE>(val));
     QString str = pString;
     m_changed = m_text != str;
@@ -641,7 +713,7 @@ bool HardwareFieldYmEnvShape::Update(const TargetModel *pTarget)
 //-----------------------------------------------------------------------------
 bool HardwareFieldYmMixer::Update(const TargetModel *pTarget)
 {
-    uint32_t val = (pTarget->GetYm().m_regs[Regs::YM_MIXER]);
+    uint32_t val = (pTarget->GetHwRegs().m_regs[HwRegs::kYmMixer]);
 
     QString str;
     if (!Regs::GetField_YM_MIXER_TONE_A_OFF(val))
@@ -666,7 +738,7 @@ bool HardwareFieldYmMixer::Update(const TargetModel *pTarget)
 //-----------------------------------------------------------------------------
 bool HardwareFieldYmVolume::Update(const TargetModel *pTarget)
 {
-    uint16_t val = pTarget->GetYm().m_regs[m_index];
+    uint16_t val = pTarget->GetHwRegs().m_regs[m_index];
     uint8_t squareVol = Regs::GetField_YM_VOLUME_A_VOL(val);
     bool useEnv = Regs::GetField_YM_VOLUME_A_ENVELOPE(val);
 
@@ -1164,17 +1236,21 @@ HardwareWindow::HardwareWindow(QWidget *parent, Session* pSession) :
 
 
     addField(pExpMfp,  "Timer A Control Mode",        Regs::g_fieldDef_MFP_TACR_MODE_TIMER_A);
-    addField(pExpMfp,  "Timer A Data",                Regs::g_fieldDef_MFP_TADR_ALL);
+    addShared(pExpMfp, "Timer A Data",                new HardwareFieldIntReg(HwRegs::kMfpTADR));
     addShared(pExpMfp, "Timer A Vector",              new HardwareFieldAddr(HardwareFieldAddr::Mfp, 13));
+    addShared(pExpMfp, "Timer A Rate",                new HardwareMfpTimerRate(HardwareMfpTimerRate::kTimerA));
     addField(pExpMfp,  "Timer B Control Mode",        Regs::g_fieldDef_MFP_TBCR_MODE_TIMER_B);
-    addField(pExpMfp,  "Timer B Data",                Regs::g_fieldDef_MFP_TBDR_ALL);
+    addShared(pExpMfp, "Timer B Data",                new HardwareFieldIntReg(HwRegs::kMfpTBDR));
     addShared(pExpMfp, "Timer B Vector",              new HardwareFieldAddr(HardwareFieldAddr::Mfp, 8));
+    addShared(pExpMfp, "Timer B Rate",                new HardwareMfpTimerRate(HardwareMfpTimerRate::kTimerB));
     addField(pExpMfp,  "Timer C Control Mode",        Regs::g_fieldDef_MFP_TCDCR_MODE_TIMER_C);
-    addField(pExpMfp,  "Timer C Data",                Regs::g_fieldDef_MFP_TCDR_ALL);
+    addShared(pExpMfp, "Timer C Data",                new HardwareFieldIntReg(HwRegs::kMfpTCDR));
     addShared(pExpMfp, "Timer C Vector",              new HardwareFieldAddr(HardwareFieldAddr::Mfp, 5));
+    addShared(pExpMfp, "Timer C Rate",                new HardwareMfpTimerRate(HardwareMfpTimerRate::kTimerC));
     addField(pExpMfp,  "Timer D Control Mode",        Regs::g_fieldDef_MFP_TCDCR_MODE_TIMER_D);
-    addField(pExpMfp,  "Timer D Data",                Regs::g_fieldDef_MFP_TDDR_ALL);
+    addShared(pExpMfp, "Timer D Data",                new HardwareFieldIntReg(HwRegs::kMfpTDDR));
     addShared(pExpMfp, "Timer D Vector",              new HardwareFieldAddr(HardwareFieldAddr::Mfp, 4));
+    addShared(pExpMfp, "Timer D Rate",                new HardwareMfpTimerRate(HardwareMfpTimerRate::kTimerD));
 
     addField(pExpMfp, "Sync Char",                    Regs::g_fieldDef_MFP_SCR_ALL);
     addMultiField(pExpMfp, "USART Control",           Regs::g_regFieldsDef_MFP_UCR);
@@ -1187,18 +1263,18 @@ HardwareWindow::HardwareWindow(QWidget *parent, Session* pSession) :
     addField(pExpACIA,  "Keyboard Data",              Regs::g_fieldDef_ACIA_KB_DATA_ALL);
 
     // ===== YM ====
-    addShared(pExpYm, "Period A",     new HardwareFieldYmPeriod(Regs::YM_PERIOD_A_LO));
-    addShared(pExpYm, "Period B",     new HardwareFieldYmPeriod(Regs::YM_PERIOD_B_LO));
-    addShared(pExpYm, "Period C",     new HardwareFieldYmPeriod(Regs::YM_PERIOD_C_LO));
-    addShared(pExpYm, "Noise Period", new HardwareFieldYmPeriod(Regs::YM_PERIOD_NOISE));
+    addShared(pExpYm, "Period A",     new HardwareFieldYmPeriod(HwRegs::kYmPeriodALo));
+    addShared(pExpYm, "Period B",     new HardwareFieldYmPeriod(HwRegs::kYmPeriodBLo));
+    addShared(pExpYm, "Period C",     new HardwareFieldYmPeriod(HwRegs::kYmPeriodCLo));
+    addShared(pExpYm, "Noise Period", new HardwareFieldYmPeriod(HwRegs::kYmPeriodNoise));
     addShared(pExpYm, "Mixer",        new HardwareFieldYmMixer());
-    addShared(pExpYm, "Volume A",     new HardwareFieldYmVolume(Regs::YM_VOLUME_A));
-    addShared(pExpYm, "Volume B",     new HardwareFieldYmVolume(Regs::YM_VOLUME_B));
-    addShared(pExpYm, "Volume C",     new HardwareFieldYmVolume(Regs::YM_VOLUME_C));
-    addShared(pExpYm, "Env Period",   new HardwareFieldYmPeriod(Regs::YM_PERIOD_ENV_LO));
+    addShared(pExpYm, "Volume A",     new HardwareFieldYmVolume(HwRegs::kYmVolumeA));
+    addShared(pExpYm, "Volume B",     new HardwareFieldYmVolume(HwRegs::kYmVolumeB));
+    addShared(pExpYm, "Volume C",     new HardwareFieldYmVolume(HwRegs::kYmVolumeC));
+    addShared(pExpYm, "Env Period",   new HardwareFieldYmPeriod(HwRegs::kYmPeriodEnvLo));
     addShared(pExpYm, "Env Shape",    new HardwareFieldYmEnvShape());
-    addShared(pExpYm, "Port A",       new HardwareFieldYm(Regs::YM_PORT_A));
-    addShared(pExpYm, "Port B",       new HardwareFieldYm(Regs::YM_PORT_B));
+    addShared(pExpYm, "Port A",       new HardwareFieldIntReg(HwRegs::kYmPortA));
+    addShared(pExpYm, "Port B",       new HardwareFieldIntReg(HwRegs::kYmPortB));
 
     // ===== BLITTER ====
     // TODO these need sign expansion etc

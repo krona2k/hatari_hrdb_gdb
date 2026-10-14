@@ -13,7 +13,7 @@
 
 #include "../models/session.h"
 #include "../models/stringformat.h"
-#include "../hardware/tos.h"
+#include "../hardware/tos.h"    // annotations
 #include "symboltext.h"
 #include "qtversionwrapper.h"
 
@@ -236,12 +236,13 @@ void RegisterWidget::paintEvent(QPaintEvent * ev)
     painter.fillRect(this->rect(), br);
 
     // Draw border rectangle
-    painter.setPen(QPen(pal.dark(), hasFocus() ? 6 : 2));
+    QColor borderCol = pal.color(QPalette::ColorGroup::Disabled, QPalette::Text);
+    painter.setPen(QPen(borderCol, hasFocus() ? 6 : 2));
     painter.drawRect(this->rect());
 
     // Draw Rulers
     int rectW = this->rect().right() - m_charWidth * 2;
-    painter.setPen(QPen(pal.dark(), 2));
+    painter.setPen(QPen(borderCol, 2));
     for (int i = 0; i < m_rulers.size(); ++i)
     {
         int y = GetPixelFromRow(m_rulers[i].y) + m_lineHeight / 2;
@@ -252,7 +253,7 @@ void RegisterWidget::paintEvent(QPaintEvent * ev)
     }
 
     // Draw Tokens
-    painter.setPen(QPen(pal.dark(), 1));
+    painter.setPen(QPen(borderCol, 1));
     for (int i = 0; i < m_tokens.size(); ++i)
     {
         Token& tok = m_tokens[i];
@@ -268,11 +269,11 @@ void RegisterWidget::paintEvent(QPaintEvent * ev)
         if (tok.colour == TokenColour::kNormal)
             col = pal.text().color();
         else if (tok.colour == TokenColour::kChanged)
-            col = Qt::red;
+            col = m_pSession->m_changedColour;
         else if (tok.colour == TokenColour::kInactive)
             col = pal.light().color();
         else if (tok.colour == TokenColour::kCode)
-            col = Qt::darkGreen;
+            col = m_pSession->m_commentColour;
 
         if (i == m_tokenUnderMouseIndex && tok.type != TokenType::kNone)
         {
@@ -431,7 +432,7 @@ void RegisterWidget::mainStateUpdated()
     if (pMem)
     {
         hop68::buffer_reader disasmBuf(pMem->GetData(), pMem->GetSize(), pMem->GetAddress());
-        Disassembler::decode_buf(disasmBuf, m_disasm, m_pTargetModel->GetDisasmSettings(), pMem->GetAddress(), 2);
+        Disassembler::decode_buf(disasmBuf, m_disasm, m_pTargetModel->GetDisasmSettings(), pMem->GetAddress(), 2, -1);
         // Update used registers
         if (m_disasm.lines.size() > 0)
             m_cpuRegMask = DisAnalyse::getRegisterUsage(m_disasm.lines[0].inst);
@@ -629,11 +630,11 @@ void RegisterWidget::PopulateRegisters()
                 }
                 // TOS calls
                 if (regs.m_value[Registers::GemdosOpcode] != 0xffff)
-                    col = AddToken(col, row, GetTrapAnnotation(1, regs.m_value[Registers::GemdosOpcode]), TokenType::kNone, 0, TokenColour::kChanged);
+                    col = AddToken(col, row, GetTrapAnnotation(1, regs.m_value[Registers::GemdosOpcode]), TokenType::kNone, 0, TokenColour::kCode);
                 else if (regs.m_value[Registers::BiosOpcode] != 0xffff)
-                    col = AddToken(col, row, GetTrapAnnotation(13, regs.m_value[Registers::BiosOpcode]), TokenType::kNone, 0, TokenColour::kChanged);
+                    col = AddToken(col, row, GetTrapAnnotation(13, regs.m_value[Registers::BiosOpcode]), TokenType::kNone, 0, TokenColour::kCode);
                 else if (regs.m_value[Registers::XbiosOpcode] != 0xffff)
-                    col = AddToken(col, row, GetTrapAnnotation(14, regs.m_value[Registers::XbiosOpcode]), TokenType::kNone, 0, TokenColour::kChanged);
+                    col = AddToken(col, row, GetTrapAnnotation(14, regs.m_value[Registers::XbiosOpcode]), TokenType::kNone, 0, TokenColour::kCode);
             }
 
             // Add EA analysis

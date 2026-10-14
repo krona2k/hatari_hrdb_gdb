@@ -18,7 +18,7 @@ Basic program control:
 | Ctrl+U, V     | Run To VBL                                   |
 | Ctrl+U, H     | Run To HBL                                   |
 | Ctrl+U, R     | Run To RAM (exits e.g. TOS, cartridge)       |
-| Alt+Shift+B   | Add breakpoint (dialog)                      |
+| Ctrl+B        | Add breakpoint (dialog)                      |
 
 Window focus:
 | Key           | Operation                |
@@ -53,6 +53,7 @@ Disassembly focus
 | Key           | Operation                           |
 |---------------|-------------------------------------|
 | Up/Down       | Move Cursor                         |
+| Left/Right    | Move up/down by one CPU/DSP word    |
 | Page Up/Down  | Move by several lines               |
 | Ctrl+B        | Toggle breakpoint (cursor position) |
 | Ctrl+F        | Search for text/hexadecimal string  |

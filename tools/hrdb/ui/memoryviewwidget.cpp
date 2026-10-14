@@ -796,18 +796,7 @@ void MemoryWidget::paintEvent(QPaintEvent* ev)
         int char_width = info.horizontalAdvance("0");
 
         // Set up the rendering info
-        QColor backCol = pal.window().color();
-        QColor cols[7] =
-        {
-            QColor(backCol.red() ^  0, backCol.green() ^ 32, backCol.blue() ^ 0),
-            QColor(backCol.red() ^ 32, backCol.green() ^  0, backCol.blue() ^ 0),
-            QColor(backCol.red() ^  0, backCol.green() ^ 32, backCol.blue() ^ 32),
-            QColor(backCol.red() ^ 32, backCol.green() ^  0, backCol.blue() ^ 32),
-            QColor(backCol.red() ^  0, backCol.green() ^  0, backCol.blue() ^ 32),
-            QColor(backCol.red() ^ 32, backCol.green() ^ 32, backCol.blue() ^ 0),
-            QColor(backCol.red() ^ 32, backCol.green() ^ 32, backCol.blue() ^ 32),
-        };
-
+        const QColor* cols = m_pSession->m_memorySymbolColours;
         painter.setPen(pal.text().color());
         for (int row = 0; row < m_rows.size(); ++row)
         {
@@ -845,7 +834,7 @@ void MemoryWidget::paintEvent(QPaintEvent* ev)
 
                 bool changed = r.m_byteChanged[col];
                 QChar st = r.m_text.at(col);
-                painter.setPen(changed ? Qt::red : pal.text().color());
+                painter.setPen(changed ? m_pSession->m_changedColour: pal.text().color());
                 painter.drawText(x, text_y, st);
             }
         }
@@ -1428,7 +1417,7 @@ MemoryWindow::MemoryWindow(QWidget *parent, Session* pSession, int windowIndex) 
 
     connect(m_pAddressEdit,  &QLineEdit::returnPressed,                this, &MemoryWindow::returnPressedSlot);
     connect(m_pAddressEdit,  &QLineEdit::textChanged,                  this, &MemoryWindow::textEditedSlot);
-    connect(m_pLockCheckBox, &QCheckBox::stateChanged,                 this, &MemoryWindow::lockClickedSlot);
+    connect(m_pLockCheckBox, &CHECKBOX_CHANGED_EVENT,                  this, &MemoryWindow::lockClickedSlot);
     connect(m_pSession,      &Session::addressRequested,               this, &MemoryWindow::requestAddress);
     connect(m_pMemoryWidget, &MemoryWidget::cursorChangedSignal,       this, &MemoryWindow::cursorChangedSlot);
     connect(m_pMemoryWidget, &MemoryWidget::spaceChangedSignal,        this, &MemoryWindow::syncUiElements);

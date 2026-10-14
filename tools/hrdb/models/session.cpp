@@ -2,6 +2,8 @@
 #include <QtNetwork>
 #include <QTimer>
 #include <QFontDatabase>
+#include <QApplication>
+#include <QPalette>
 
 #include "targetmodel.h"
 #include "../transport/dispatcher.h"
@@ -32,10 +34,12 @@ Session::Session() :
     // Default settings
     m_settings.m_bSquarePixels = false;
     m_settings.m_bDisassHexNumerics = false;
+    m_settings.m_bUserReset = true;
     m_settings.m_profileDisplayMode = Settings::kTotal;
     m_settings.m_liveRefresh = false;
     m_settings.m_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     loadSettings();
+    chooseColours();
 }
 
 Session::~Session()
@@ -103,6 +107,7 @@ void Session::loadSettings()
     }
     m_settings.m_bSquarePixels = settings.value("squarePixels", QVariant(false)).toBool();
     m_settings.m_bDisassHexNumerics = settings.value("disassHexNumerics", QVariant(false)).toBool();
+    m_settings.m_bUserReset = settings.value("userReset", QVariant(true)).toBool(); //True: Keep original behaviour
     m_settings.m_liveRefresh = settings.value("liveRefresh", QVariant(false)).toBool();
     m_settings.m_profileDisplayMode = settings.value("profileDisplayMode", QVariant(Settings::kTotal)).toInt();
     settings.endGroup();
@@ -116,6 +121,7 @@ void Session::saveSettings()
     settings.beginGroup("Session");
     settings.setValue("font", m_settings.m_font.toString());
     settings.setValue("squarePixels", m_settings.m_bSquarePixels);
+    settings.setValue("userReset", m_settings.m_bUserReset);
     settings.setValue("disassHexNumerics", m_settings.m_bDisassHexNumerics);
     settings.setValue("liveRefresh", m_settings.m_liveRefresh);
     settings.setValue("profileDisplayMode", m_settings.m_profileDisplayMode);
@@ -131,6 +137,30 @@ void Session::connectTimerCallback()
         QHostAddress qha(QHostAddress::LocalHost);
         m_pTcpSocket->connectToHost(qha, 56001);
     }
+}
+
+void Session::chooseColours()
+{
+    // Switch some shared colours based on whether the mode is light or dark.
+    // This method is taken from https://www.qt.io/blog/dark-mode-on-windows-11-with-qt-6.5
+    const QPalette defaultPalette;
+    bool isDark = defaultPalette.color(QPalette::WindowText).lightness()
+           > defaultPalette.color(QPalette::Window).lightness();
+
+    m_isDark = isDark;
+    m_commentColour = isDark ? QColor(32, 224, 32) : Qt::darkGreen;
+    m_changedColour = isDark ? QColor(255, 32, 64) : QColor(192, 0, 0);
+
+    QColor backCol = defaultPalette.window().color();
+    // Decide direction to adjust the back colour
+    int adj = m_isDark ? 48 : -32;
+    m_memorySymbolColours[0] = QColor(backCol.red() +   0, backCol.green() + adj, backCol.blue() ^ 0);
+    m_memorySymbolColours[1] = QColor(backCol.red() + adj, backCol.green() +   0, backCol.blue() ^ 0);
+    m_memorySymbolColours[2] = QColor(backCol.red() +   0, backCol.green() + adj, backCol.blue() + adj);
+    m_memorySymbolColours[3] = QColor(backCol.red() + adj, backCol.green() +   0, backCol.blue() + adj);
+    m_memorySymbolColours[4] = QColor(backCol.red() +   0, backCol.green() +   0, backCol.blue() + adj);
+    m_memorySymbolColours[5] = QColor(backCol.red() + adj, backCol.green() + adj, backCol.blue() ^ 0);
+    m_memorySymbolColours[6] = QColor(backCol.red() + adj, backCol.green() + adj, backCol.blue() + adj);
 }
 
 void Session::resetWarm()

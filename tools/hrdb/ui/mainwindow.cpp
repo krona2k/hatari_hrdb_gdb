@@ -301,7 +301,7 @@ void MainWindow::memoryChanged(int slot, uint64_t /*commandId*/)
         {
             // Fetch data and decode the next instruction.
             hop68::buffer_reader disasmBuf(pMem->GetData(), pMem->GetSize(), pMem->GetAddress());
-            Disassembler::decode_buf(disasmBuf, m_disasm, m_pTargetModel->GetDisasmSettings(), pMem->GetAddress(), 1);
+            Disassembler::decode_buf(disasmBuf, m_disasm, m_pTargetModel->GetDisasmSettings(), pMem->GetAddress(), 1, -1);
         }
     }
     if (slot == MemorySlot::kMainDspPC)
@@ -578,20 +578,28 @@ void MainWindow::DisconnectTriggered()
 
 void MainWindow::WarmResetTriggered()
 {
-    int ret = ShowResetWarning();
+    if (m_session.GetSettings().m_bUserReset)
+    {
+      int ret = ShowResetWarning();
+      if (ret == QMessageBox::No)
+        return;
+    }
     // Use the shared session call for this, which handles
     // things like symbol loading
-    if (ret == QMessageBox::Yes)
-        m_session.resetWarm();
+    m_session.resetWarm();
 }
 
 void MainWindow::ColdResetTriggered()
 {
-    int ret = ShowResetWarning();
+    if (m_session.GetSettings().m_bUserReset)
+    {
+      int ret = ShowResetWarning();
+      if (ret == QMessageBox::No)
+        return;
+    }
     // Use the shared session call for this, which handles
     // things like symbol loading
-    if (ret == QMessageBox::Yes)
-        m_session.resetCold();
+    m_session.resetCold();
 }
 
 void MainWindow::FastForwardTriggered()
@@ -821,6 +829,11 @@ void MainWindow::messageSet(const QString &msg)
 
 void MainWindow::requestMainState(uint32_t pc)
 {
+    m_mainStateCompleteRequest = 0;
+    // Clear any in-flight update
+    if (m_pTargetModel->IsMainStateUpdating())
+        m_pTargetModel->SetMainUpdate(false);
+
     // Insert flag for the start of main state updating
     m_mainStateStartedRequest = m_pDispatcher->InsertFlush();
 

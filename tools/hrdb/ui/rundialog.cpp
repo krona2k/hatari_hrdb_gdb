@@ -17,6 +17,7 @@
 #include "../models/session.h"
 #include "quicklayout.h"
 #include "exceptiondialog.h"
+#include "qtversionwrapper.h"
 
 #ifdef Q_OS_MACOS
 #define USE_MAC_BUNDLE
@@ -98,8 +99,10 @@ RunDialog::RunDialog(QWidget *parent, Session* pSession) :
     m_pWatcherFilesTextEdit->setPlaceholderText("<watch run program/image>");
     m_pPrgTextEdit->setPlaceholderText("<.prg file or disk image>");
 
+    // NOTE: these currently need to be in same order as the enum
     m_pBreakModeCombo->addItem(tr("None"), LaunchSettings::BreakMode::kNone);
     m_pBreakModeCombo->addItem(tr("Boot"), LaunchSettings::BreakMode::kBoot);
+    m_pBreakModeCombo->addItem(tr("Bootsector Start"), LaunchSettings::BreakMode::kBootsector);
     m_pBreakModeCombo->addItem(tr("Program Start"), LaunchSettings::BreakMode::kProgStart);
     m_pBreakModeCombo->addItem(tr("Program Breakpoint"), LaunchSettings::BreakMode::kProgramBreakpoint);
     m_pBreakModeCombo->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
@@ -174,7 +177,7 @@ RunDialog::RunDialog(QWidget *parent, Session* pSession) :
     connect(pHatariConfigButton, &QPushButton::clicked, this, &RunDialog::hatariConfigClicked);
     connect(m_pWatcherFilesTextEdit, &QLineEdit::textChanged, this, &RunDialog::watcherTextChanged);
     connect(m_pWatcherCheckBox, &QCheckBox::stateChanged, this, &RunDialog::watcherActiveChanged);
-    connect(m_pFastLaunchCheckBox, &QCheckBox::stateChanged, this, &RunDialog::fastLaunchChanged);   
+    connect(m_pFastLaunchCheckBox, &CHECKBOX_CHANGED_EVENT, this, &RunDialog::fastLaunchChanged);
     connect(pOkButton, &QPushButton::clicked, this, &RunDialog::okClicked);
     connect(pCancelButton, &QPushButton::clicked, this, &RunDialog::reject);
     connect(m_pBreakModeCombo, SIGNAL(activated(int)), SLOT(breakModeChangedSlot(int)));  // this is user-changed
@@ -206,7 +209,7 @@ void RunDialog::LoadSettings()
     m_pWatcherFilesTextEdit->setText(m_launchSettings.m_watcherFiles);
     m_pWatcherFilesTextEdit->setEnabled(m_launchSettings.m_watcherActive);
     m_pWatcherCheckBox->setCheckState(m_launchSettings.m_watcherActive?Qt::CheckState::Checked:Qt::CheckState::Unchecked);
-    m_pBreakModeCombo->setCurrentIndex(m_launchSettings.m_breakMode);
+    m_pBreakModeCombo->setCurrentIndex(m_pBreakModeCombo->findData(QVariant(m_launchSettings.m_breakMode)));
     m_pFastLaunchCheckBox->setChecked(m_launchSettings.m_fastLaunch);
     m_pBreakpointTextEdit->setText(m_launchSettings.m_breakPointTxt);
     m_pBreakpointTextEdit->setVisible(m_launchSettings.m_breakMode == LaunchSettings::kProgramBreakpoint);
@@ -254,7 +257,9 @@ void RunDialog::closeEvent(QCloseEvent *event)
 
 void RunDialog::breakModeChangedSlot(int index)
 {
-    m_pBreakpointTextEdit->setVisible(index == LaunchSettings::kProgramBreakpoint);
+    (void)index;
+    int mode = m_pBreakModeCombo->currentData().toInt();
+    m_pBreakpointTextEdit->setVisible(mode == LaunchSettings::kProgramBreakpoint);
 }
 
 void RunDialog::okClicked()
@@ -400,7 +405,7 @@ void RunDialog::UpdateInternalSettingsFromUI()
     m_launchSettings.m_hatariFilename = m_pExecutableTextEdit->text();
     m_launchSettings.m_prgFilename = m_pPrgTextEdit->text().trimmed();
     m_launchSettings.m_argsTxt = m_pArgsTextEdit->text().trimmed();
-    m_launchSettings.m_breakMode = static_cast<LaunchSettings::BreakMode>(m_pBreakModeCombo->currentIndex());
+    m_launchSettings.m_breakMode = static_cast<LaunchSettings::BreakMode>(m_pBreakModeCombo->currentData().toInt());
     m_launchSettings.m_workingDirectory = m_pWorkingDirectoryTextEdit->text();
     m_launchSettings.m_hatariConfigFilename = m_pHatariConfigTextEdit->text();
     m_launchSettings.m_watcherFiles = m_pWatcherFilesTextEdit->text();

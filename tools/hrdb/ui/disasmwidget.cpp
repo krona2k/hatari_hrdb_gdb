@@ -185,7 +185,81 @@ bool DisasmWidget::SetSearchResultAddress(uint32_t addr)
     return true;
 }
 
-void DisasmWidget::MoveUp()
+uint32_t DisasmWidget::GetAddressUp() const
+{
+    // Disassemble upwards to see if something sensible appears.
+    // Stop at the first valid instruction opcode.
+    for (uint32_t off = m_minInstSize; off <= m_maxInstSize; off += m_minInstSize)
+    {
+        uint32_t targetAddr = m_logicalAddr - off;
+
+        // TODO: this is rather ugly.
+        if (m_proc == kProcCpu)
+        {
+            // Check valid memory
+            if (m_memory.GetAddress() > targetAddr ||
+                m_memory.GetAddress() + m_memory.GetSize() <= targetAddr)
+            {
+                continue;
+            }
+            // Get memory buffer for this range
+            uint32_t offset = targetAddr - m_memory.GetAddress();
+            uint32_t size = m_memory.GetSize() - offset;
+
+            hop68::buffer_reader disasmBuf(m_memory.GetData() + offset, size, m_memory.GetAddress() + offset);
+            hop68::instruction inst;
+            Disassembler::decode_inst(disasmBuf, inst, m_pTargetModel->GetDisasmSettings());
+            if (inst.opcode != hop68::Opcode::NONE)
+            {
+                return targetAddr;
+            }
+        }
+        else
+        {
+            // Check valid memory
+            if (m_memory.GetAddress() > targetAddr ||
+                m_memory.GetAddress() + m_memory.GetSize() / 3 <= targetAddr)
+            {
+                continue;
+            }
+            // Get memory buffer for this range
+            uint32_t offset = targetAddr - m_memory.GetAddress();
+            uint32_t size = m_memory.GetSize() - offset * 3;
+
+            hop56::buffer_reader disasmBuf(m_memory.GetData() + offset * 3, size, m_memory.GetAddress() + offset);
+            hop56::instruction inst;
+            hop56::decode_settings dummy;
+            Disassembler56::decode_inst(disasmBuf, inst, dummy);
+            if (inst.opcode != hop56::Opcode::INVALID)
+            {
+                return targetAddr;
+            }
+        }
+    }
+
+    // Clamp at low memory
+    if (m_logicalAddr > m_minInstSize)
+        return m_logicalAddr - m_minInstSize;
+    return 0;
+}
+
+uint32_t DisasmWidget::GetAddressDown() const
+{
+    if (m_disasm.size() > 0)
+    {
+        // Find our current line in disassembly
+        for (int i = 0; i < m_disasm.size(); ++i)
+        {
+            if (m_disasm[i].address == m_logicalAddr)
+                return m_disasm[i].GetEndAddr();
+        }
+        // Default to line 1
+        return m_disasm[0].GetEndAddr();
+    }
+    return m_logicalAddr + m_minInstSize;
+}
+
+void DisasmWidget::MoveUpKey()
 {
     if (m_cursorRow != 0)
     {
@@ -197,94 +271,20 @@ void DisasmWidget::MoveUp()
     if (m_requestId != 0)
         return; // not up to date
 
-    // Disassemble upwards to see if something sensible appears.
-    // Stop at the first valid instruction opcode.
-    if (m_requestId == 0)
-    {
-        for (uint32_t off = m_minInstSize; off <= m_maxInstSize; off += m_minInstSize)
-        {
-            uint32_t targetAddr = m_logicalAddr - off;
-
-            // TODO: this is rather ugly.
-            if (m_proc == kProcCpu)
-            {
-                // Check valid memory
-                if (m_memory.GetAddress() > targetAddr ||
-                    m_memory.GetAddress() + m_memory.GetSize() <= targetAddr)
-                {
-                    continue;
-                }
-                // Get memory buffer for this range
-                uint32_t offset = targetAddr - m_memory.GetAddress();
-                uint32_t size = m_memory.GetSize() - offset;
-
-                hop68::buffer_reader disasmBuf(m_memory.GetData() + offset, size, m_memory.GetAddress() + offset);
-                hop68::instruction inst;
-                Disassembler::decode_inst(disasmBuf, inst, m_pTargetModel->GetDisasmSettings());
-                if (inst.opcode != hop68::Opcode::NONE)
-                {
-                    SetAddress(targetAddr);
-                    return;
-                }
-            }
-            else
-            {
-                // Check valid memory
-                if (m_memory.GetAddress() > targetAddr ||
-                    m_memory.GetAddress() + m_memory.GetSize() / 3 <= targetAddr)
-                {
-                    continue;
-                }
-                // Get memory buffer for this range
-                uint32_t offset = targetAddr - m_memory.GetAddress();
-                uint32_t size = m_memory.GetSize() - offset * 3;
-
-                hop56::buffer_reader disasmBuf(m_memory.GetData() + offset * 3, size, m_memory.GetAddress() + offset);
-                hop56::instruction inst;
-                hop56::decode_settings dummy;
-                Disassembler56::decode_inst(disasmBuf, inst, dummy);
-                if (inst.opcode != hop56::Opcode::INVALID)
-                {
-                    SetAddress(targetAddr);
-                    return;
-                }
-            }
-        }
-    }
-
-    if (m_logicalAddr > m_minInstSize)
-        SetAddress(m_logicalAddr - m_minInstSize);
-    else
-        SetAddress(0);
+    SetAddress(GetAddressUp());
 }
 
-void DisasmWidget::MoveDown()
+void DisasmWidget::MoveDownKey()
 {
-    if (m_requestId != 0)
-        return; // not up to date
-
     if (m_cursorRow < m_rowCount -1)
     {
         ++m_cursorRow;
         update();
         return;
     }
-
-    if (m_disasm.size() > 0)
-    {
-        // Find our current line in disassembly
-        for (int i = 0; i < m_disasm.size(); ++i)
-        {
-            if (m_disasm[i].address == m_logicalAddr)
-            {
-                // This will go off and request the memory itself
-                SetAddress(m_disasm[i].GetEndAddr());
-                return;
-            }
-        }
-        // Default to line 1
-        SetAddress(m_disasm[0].GetEndAddr());
-    }
+    if (m_requestId != 0)
+        return; // not up to date
+    SetAddress(GetAddressDown());
 }
 
 void DisasmWidget::PageUp()
@@ -327,17 +327,28 @@ void DisasmWidget::PageDown()
     }
 }
 
+void DisasmWidget::MoveUpMin()
+{
+    // Move up the minimum instruction size (when not crossing 0)
+    int32_t nextUpPosition = m_logicalAddr -  m_minInstSize;
+    if (nextUpPosition >= 0)
+        SetAddress(nextUpPosition);
+}
+
+void DisasmWidget::MoveDownMin()
+{
+    // Move down the minimum instruction size
+    SetAddress(m_logicalAddr + m_minInstSize);
+}
+
 void DisasmWidget::MouseScrollUp()
 {
     if (m_requestId != 0)
         return; // not up to date
 
-    // Mouse wheel moves a fixed number of bytes so up/down comes back to the same place
-    uint32_t moveSize = m_minInstSize * static_cast<uint32_t>(m_rowCount);
-    if (m_logicalAddr > moveSize)
-        SetAddress(m_logicalAddr - moveSize);
-    else
-        SetAddress(0);
+    // Effectively move by 2 keypresses
+    m_logicalAddr = GetAddressUp();
+    SetAddress(GetAddressUp());
 }
 
 void DisasmWidget::MouseScrollDown()
@@ -345,9 +356,9 @@ void DisasmWidget::MouseScrollDown()
     if (m_requestId != 0)
         return; // not up to date
 
-    // Mouse wheel moves a fixed number of bytes so up/down comes back to the same place
-    uint32_t moveSize = m_minInstSize * static_cast<uint32_t>(m_rowCount);
-    SetAddress(m_logicalAddr + moveSize);
+    // Effectively move by 2 keypresses
+    m_logicalAddr = GetAddressDown();
+    SetAddress(GetAddressDown());
 }
 
 void DisasmWidget::RunToRow(int row)
@@ -512,7 +523,9 @@ void DisasmWidget::paintEvent(QPaintEvent* ev)
         }
 
         // Highlight the cursor row
-        QBrush cursorColour = hasFocus() ? pal.highlight() : pal.mid();
+        QBrush nonFocusHighlight = pal.mid().color().value() <= pal.highlight().color().value() //QT Dark mode fix
+          ? pal.midlight() : pal.mid();
+        QBrush cursorColour = hasFocus() ? pal.highlight() : nonFocusHighlight;
         if (m_cursorRow != -1)
         {
             painter.setPen(QPen(cursorColour, 1, Qt::PenStyle::DashLine));
@@ -544,7 +557,7 @@ void DisasmWidget::paintEvent(QPaintEvent* ev)
                 painter.setPen(Qt::PenStyle::NoPen);
 
                 const RowText& t = m_rowTexts[row];
-                if (t.isPc)
+                if (t.isPc && hasFocus())
                     painter.setPen(pal.highlightedText().color());
                 else
                     painter.setPen(pal.text().color());
@@ -586,7 +599,7 @@ void DisasmWidget::paintEvent(QPaintEvent* ev)
                     break;
                 case kComments:
                     if (!t.isPc)
-                        painter.setPen(Qt::darkGreen);
+                        painter.setPen(m_pSession->m_commentColour);
                     painter.drawText(x, text_y, t.comments);
                     break;
                 }
@@ -597,7 +610,8 @@ void DisasmWidget::paintEvent(QPaintEvent* ev)
 
     // Branches
     int x_base = m_columnLeft[kAddress] * m_charWidth - 2;
-    painter.setBrush(pal.dark());
+    QColor lineCol = pal.color(QPalette::ColorGroup::Disabled, QPalette::Text);
+    painter.setBrush(QBrush(lineCol));
 
     int arrowWidth = m_charWidth;
     int arrowHeight = arrowWidth / 2;
@@ -605,7 +619,7 @@ void DisasmWidget::paintEvent(QPaintEvent* ev)
     for (int i = 0; i < m_branches.size(); ++i)
     {
         const Branch& b = m_branches[i];
-        painter.setPen(QPen(pal.dark().color(), b.start == m_mouseRow ? 3 : 1));
+        painter.setPen(QPen(lineCol, b.start == m_mouseRow ? 3 : 1));
 
         int yStart = GetPixelFromRow(b.start) + y_midLine + 1;
         int yEnd   = GetPixelFromRow(b.stop) + y_midLine - 1;
@@ -665,8 +679,10 @@ void DisasmWidget::keyPressEvent(QKeyEvent* event)
         {
             switch (event->key())
             {
-            case Qt::Key_Up:         MoveUp();              return;
-            case Qt::Key_Down:       MoveDown();            return;
+            case Qt::Key_Up:         MoveUpKey();           return;
+            case Qt::Key_Down:       MoveDownKey();         return;
+            case Qt::Key_Left:       MoveUpMin();           return;
+            case Qt::Key_Right:      MoveDownMin();         return;
             case Qt::Key_PageUp:     PageUp();              return;
             case Qt::Key_PageDown:   PageDown();            return;
             case Qt::Key_F9:         toggleBreakpoint();    return;
@@ -760,7 +776,8 @@ void DisasmWidget::CalcDisasm68()
     hop68::buffer_reader disasmBuf(m_memory.GetData() + offset, size, m_memory.GetAddress() + offset);
 
     Disassembler::disassembly tmp;
-    Disassembler::decode_buf(disasmBuf, tmp, m_pTargetModel->GetDisasmSettings(), m_logicalAddr, m_rowCount);
+    Disassembler::decode_buf(disasmBuf, tmp, m_pTargetModel->GetDisasmSettings(), m_logicalAddr, m_rowCount,
+        m_pTargetModel->GetStartStopPC(kProcCpu));
 
     // Convert to shared format
     size_t rowCount = tmp.lines.size();
@@ -1403,6 +1420,12 @@ void DisasmWidget::copyRightClick()
         ref.setFieldWidth(30);
         ref << line.disasm;
 
+        if (m_bShowHex)
+        {
+            ref.setFieldWidth(26);
+            ref << QString("; ") + line.hex + "  ";
+        }
+
         if (line.comments.size() != 0)
         {
             ref.setFieldWidth(0);
@@ -1625,8 +1648,8 @@ DisasmWindow::DisasmWindow(QWidget *parent, Session* pSession, int windowIndex) 
     connect(m_pProcButton,  &QPushButton::clicked,                    this, &DisasmWindow::procChangedClicked);
     connect(m_pAddressEdit, &QLineEdit::returnPressed,                this, &DisasmWindow::returnPressedSlot);
     connect(m_pAddressEdit, &QLineEdit::textEdited,                   this, &DisasmWindow::textChangedSlot);
-    connect(m_pFollowPC,    &QCheckBox::stateChanged,                 this, &DisasmWindow::followPCClickedSlot);
-    connect(m_pShowHex,     &QCheckBox::stateChanged,                 this, &DisasmWindow::showHexClickedSlot);
+    connect(m_pFollowPC,    &CHECKBOX_CHANGED_EVENT,                  this, &DisasmWindow::followPCClickedSlot);
+    connect(m_pShowHex,     &CHECKBOX_CHANGED_EVENT,                  this, &DisasmWindow::showHexClickedSlot);
     connect(m_pSession,     &Session::addressRequested,               this, &DisasmWindow::requestAddress);
     connect(m_pTargetModel, &TargetModel::searchResultsChangedSignal, this, &DisasmWindow::searchResultsSlot);
     connect(m_pTargetModel, &TargetModel::symbolTableChangedSignal,   this, &DisasmWindow::symbolTableChangedSlot);
@@ -1695,12 +1718,22 @@ void DisasmWindow::saveSettings()
 
 void DisasmWindow::keyDownPressed()
 {
-    m_pDisasmWidget->MoveDown();
+    m_pDisasmWidget->MoveDownKey();
 }
 
 void DisasmWindow::keyUpPressed()
 {
-    m_pDisasmWidget->MoveUp();
+    m_pDisasmWidget->MoveUpKey();
+}
+
+void DisasmWindow::keyLeftPressed()
+{
+    m_pDisasmWidget->MoveUpMin();
+}
+
+void DisasmWindow::keyRightPressed()
+{
+    m_pDisasmWidget->MoveDownMin();
 }
 
 void DisasmWindow::keyPageDownPressed()

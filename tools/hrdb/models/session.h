@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QFont>
 #include <QProcess>
+#include <QColor>
+
 #include "launcher.h"
 
 class QTcpSocket;
@@ -14,7 +16,7 @@ class Dispatcher;
 class TargetModel;
 class FileWatcher;
 
-#define VERSION_STRING      "0.009-DSP (August 2024)"
+#define VERSION_STRING      "0.010 (September 2025)"
 #define HELP_URL            "http://clarets.org/steve/projects/hrdb.html"
 
 // Wrapper of QProcess that "allows" a detact() after start().
@@ -57,6 +59,8 @@ public:
         bool        m_bSquarePixels;
         // DISASSEMBLY
         bool        m_bDisassHexNumerics;
+        // RESETTING
+        bool        m_bUserReset;
         //
         enum ProfileDisplayMode
         {
@@ -83,7 +87,7 @@ public:
 
     QTcpSocket*     m_pTcpSocket;
     QTemporaryFile* m_pStartupFile;         // Debugger commands at Hatari launch
-    QTemporaryFile* m_pProgramStartScript;      // Debugger commands run at program start
+    QTemporaryFile* m_pProgramStartScript;  // Debugger commands run at program start
 
     QTemporaryFile* m_pLoggingFile;
     FileWatcher*    m_pFileWatcher;
@@ -94,6 +98,12 @@ public:
 
     // Controller Hatari process
     DetachableProcess*       m_pHatariProcess;
+
+    // Colour choices
+    bool            m_isDark;               // overall dark mode decision
+    QColor          m_commentColour;        // usually some form of green
+    QColor          m_changedColour;        // usually red/hihglight
+    QColor          m_memorySymbolColours[7];
 
     const Settings& GetSettings() const;
     const LaunchSettings& GetLaunchSettings() const;
@@ -131,6 +141,9 @@ private slots:
     // Called shortly after stop notification received
     void connectTimerCallback();
 private:
+
+    void chooseColours();
+
     QTimer*          m_pTimer;
     bool             m_autoConnect;
 

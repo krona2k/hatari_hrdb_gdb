@@ -1,11 +1,11 @@
 /*
  * Hatari - remotedebug.c
- * 
+ *
  * This file is distributed under the GNU General Public License, version 2
  * or at your option any later version. Read the file gpl.txt for details.
- * 
+ *
  * Remote debugging support via a network port.
- * 
+ *
  */
 
 #define GDB_SERVER
@@ -57,6 +57,7 @@
 #include "statusbar.h"
 #include "video.h"	/* FIXME: video.h is dependent on HBL_PALETTE_LINES from screen.h */
 #include "reset.h"
+#include "mfp.h"
 
 #include "debugInfo.h"
 #include "file.h"
@@ -95,7 +96,8 @@ static bool bRemoteBreakIsActive = false;
 /* 0x1007    add savebin */
 /* 0x1008    add dmem, DSP support in NotifyConfig */
 /* 0x1009    support parser command rdb_exc in debugui.c */
-#define REMOTEDEBUG_PROTOCOL_ID	(0x1009)
+/* 0x100a    switch infoym -> hwregs and add MFP internal state */
+#define REMOTEDEBUG_PROTOCOL_ID	(0x100a)
 
 /* Char ID to denote terminator of a token. This is under the ASCII "normal"
 	character value range so that 32-255 can be used */
@@ -387,7 +389,7 @@ static void RemoteDebug_NotifyProfile(RemoteDebugState* state)
 	send_sep(state);
 	send_hex(state, Profile_CpuIsEnabled() ? 1 : 0);
 	send_sep(state);
-	
+
 	index = 0;
 	lastaddr = 0;
 	while (Profile_CpuQuery(index, &result))
@@ -507,7 +509,6 @@ static void RemoteDebug_HardwareSync(void)
 	DmaSnd_RemoteDebugSync();
 	Video_RemoteDebugSync();
 	Blitter_RemoteDebugSync();
-	ACIA_RemoteDebugSync();
 }
 
 // -----------------------------------------------------------------------------
@@ -610,11 +611,11 @@ static const RemoteDebugDspReg g_remoteDebugDspRegs[] =
 };
 
 /**
- * Dump register contents. 
+ * Dump register contents.
  * This also includes Hatari variables, which we treat as a subset of regs.
- * 
+ *
  * Input: "regs\n"
- * 
+ *
  * Output: "regs <reg:value>*N\n"
  */
 static int RemoteDebug_regs(int nArgc, char *psArgs[], RemoteDebugState* state)
@@ -950,7 +951,7 @@ static int RemoteDebug_symlist(int nArgc, char *psArgs[], RemoteDebugState* stat
 	send_sep(state);
 	send_hex(state, count);
 	send_sep(state);
-	
+
 	for (i = 0; i < count; ++i)
 	{
 		rdb_symbol_t query;
@@ -971,7 +972,7 @@ static int RemoteDebug_symlist(int nArgc, char *psArgs[], RemoteDebugState* stat
  *
  * Input: exmask
  * Input: exmask <new_mask:hex>
- * 
+ *
  *  returns "OK <mask val:hex>"" */
 static int RemoteDebug_exmask(int nArgc, char *psArgs[], RemoteDebugState* state)
 {
@@ -1048,16 +1049,54 @@ static int RemoteDebug_setstd(int nArgc, char *psArgs[], RemoteDebugState* state
 }
 
 // -----------------------------------------------------------------------------
-/* "infoym" returns internal YM/PSG register state */
+/* "hwregs" returns internal YM/PSG/MFP register state */
 /* returns "OK" + 16 register values */
-static int RemoteDebug_infoym(int nArgc, char *psArgs[], RemoteDebugState* state)
+static int RemoteDebug_hwregs(int nArgc, char *psArgs[], RemoteDebugState* state)
 {
+	MFP_STRUCT* pCurrMfp = pMFP_Main;
 	send_str(state, "OK");
 	for (int i = 0; i < MAX_PSG_REGISTERS; ++i)
 	{
 		send_sep(state);
 		send_hex(state, PSGRegisters[i]);
 	}
+
+	// Add MFP registers too
+#define SEND_MFP(field)	{ send_sep(state); send_hex(state, pCurrMfp->field); }
+
+	SEND_MFP(GPIP);					/* General Purpose Pins / GPDR 0x01 */
+	SEND_MFP(AER);					/* Active Edge Register 0x03*/
+	SEND_MFP(DDR);					/* Data Direction Register */
+	SEND_MFP(IERA);					/* Interrupt Enable Register A 0x07 */
+	SEND_MFP(IERB);					/* Interrupt Enable Register B 0x09 */
+	SEND_MFP(IPRA);					/* Interrupt Pending Register A 0x0B */
+	SEND_MFP(IPRB);					/* Interrupt Pending Register B 0x0D */
+	SEND_MFP(ISRA);					/* Interrupt In-Service Register A 0x0F */
+	SEND_MFP(ISRB);					/* Interrupt In-Service Register B 0x11 */
+	SEND_MFP(IMRA);					/* Interrupt Mask Register A 0x13 */
+	SEND_MFP(IMRB);					/* Interrupt Mask Register B 0x15 */
+	SEND_MFP(VR);					/* Vector Register 0x17 */
+	SEND_MFP(TACR);					/* Timer A Control Register 0x19 */
+	SEND_MFP(TBCR);					/* Timer B Control Register 0x1B */
+	SEND_MFP(TCDCR);				/* Timer C/D Control Register 0x1D */
+	SEND_MFP(TADR);					/* Timer A Data Register 0x1F */
+	SEND_MFP(TBDR);					/* Timer B Data Register 0x21 */
+	SEND_MFP(TCDR);					/* Timer C Data Register 0x23 */
+	SEND_MFP(TDDR);					/* Timer D Data Register 0x25 */
+	SEND_MFP(SCR);					/* Synchronous Data Register 0x27 */
+	SEND_MFP(UCR);					/* USART Control Register 0x29 */
+	SEND_MFP(RSR);					/* Receiver Status Register 0x2B */
+	SEND_MFP(TSR);					/* Transmitter Status Register 0x2D */
+	SEND_MFP(UDR);					/* USART Data Register 0x2F */
+	SEND_MFP(IRQ);					/* IRQ signal (output) 1=IRQ requested*/
+	SEND_MFP(TAI);					/* Input signal on Timer A (for event count mode) */
+	SEND_MFP(TBI);					/* Input signal on Timer B (for event count mode) */
+
+	/* I think these are the countdown timers but their update time is not reliable*/
+	SEND_MFP(TA_MAINCOUNTER);
+	SEND_MFP(TB_MAINCOUNTER);
+	SEND_MFP(TC_MAINCOUNTER);
+	SEND_MFP(TD_MAINCOUNTER);
 	return 0;
 }
 
@@ -1415,7 +1454,7 @@ static const rdbcommand_t remoteDebugCommandList[] = {
 	{ RemoteDebug_exmask,	"exmask"	, true		},
 	{ RemoteDebug_console,	"console"	, false		},
 	{ RemoteDebug_setstd,	"setstd"	, true		},
-	{ RemoteDebug_infoym,	"infoym"	, false		},
+	{ RemoteDebug_hwregs,	"hwregs"	, false		},
 	{ RemoteDebug_profile,	"profile"	, true		},
 	{ RemoteDebug_resetwarm,"resetwarm"	, true		},
 	{ RemoteDebug_resetcold,"resetcold"	, true		},
@@ -1481,7 +1520,7 @@ static int RemoteDebug_Parse(const char *input_orig, RemoteDebugState* state)
 		psArgs[1] = input + strlen(psArgs[0]) + 1;
 		nArgc = 2;
 	}
-	
+
 	if (nArgc >= ARRAY_SIZE(psArgs))
 	{
 		retval = -1;
@@ -1650,7 +1689,7 @@ static char * GDBServer_section_offsets(void) {
     //     Relocate the first segment of the object file, which conventionally contains program code, to a starting address of xxx.
 	//     If ‘DataSeg’ is specified, relocate the second segment, which conventionally contains modifiable data, to a starting address of yyy.
 	//     GDB will report an error if the object file does not contain segment information, or does not contain at least as many segments as mentioned in the reply.
-	//     Extra segments are kept at fixed offsets relative to the last relocated segment. 
+	//     Extra segments are kept at fixed offsets relative to the last relocated segment.
 
 
 	char * reply = malloc(64);
@@ -1659,7 +1698,7 @@ static char * GDBServer_section_offsets(void) {
 	uint32_t text = DebugInfo_GetTEXT();
 	uint32_t data = DebugInfo_GetDATA();
 
-	sprintf(reply, "TextSeg=%08x;DataSeg=%08x", text, data); 
+	sprintf(reply, "TextSeg=%08x;DataSeg=%08x", text, data);
 
 	char * result = GDBServer_generate_reply(reply);
 	free(reply);
@@ -1725,7 +1764,7 @@ static char * GDBServer_continue(void) {
 static char * GDBServer_continue_to_address(const unsigned int address) {
 	// Continue the memory address
 	M68000_SetPC(address); // ????
-	
+
 	bRemoteBreakIsActive = false; // ????
 
 	return GDBServer_ack_reply();
@@ -1917,7 +1956,7 @@ static int GDBServer_Parse(const char *input_orig, RemoteDebugState* state) {
 					reply = GDBServer_generate_reply("S05");
 				} else if (strcmp(packet, "qAttached") == 0) {
 					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/General-Query-Packets.html#index-qAttached-packet
-					reply = GDBServer_generate_reply("1"); // 1 = The remote server attached to an existing process. 
+					reply = GDBServer_generate_reply("1"); // 1 = The remote server attached to an existing process.
 				} else if (strcmp(packet, "g") == 0) { // Get all registers
 					// https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html#index-g-packet
 					reply = GDBServer_read_registers(0);
@@ -2297,7 +2336,7 @@ static void RemoteDebugState_UpdateAccepted(RemoteDebugState* state)
 
 	// Read input and accumulate a command (blocking)
 	remaining = sizeof(state->cmd_buf);
-	int bytes = recv(state->AcceptedFD, 
+	int bytes = recv(state->AcceptedFD,
 		state->cmd_buf,
 		remaining,
 		0);
@@ -2538,7 +2577,7 @@ static int RemoteDebugState_InitServer(RemoteDebugState* state)
 		state->SocketFD =-1;
 		return 1;
 	}
-  
+
 	if (listen(state->SocketFD, 1) == -1) {
 		fprintf(stderr, "Failed to listen() on socket (port %d)\n", state->port);
 		RDB_CLOSE(state->SocketFD);
@@ -2546,7 +2585,7 @@ static int RemoteDebugState_InitServer(RemoteDebugState* state)
 		return 1;
 	}
 
-	// Socket is now in a listening state and could accept 
+	// Socket is now in a listening state and could accept
 	printf("Remote Debug Listening on port %d", state->port);
 	if (state->protocol == PROTOCOL_HRDB)
 		printf(", protocol %x\n", REMOTEDEBUG_PROTOCOL_ID);
@@ -2571,15 +2610,15 @@ static void RemoteDebugState_Update(RemoteDebugState* state)
 		// Connection is active
 		// Read input and accumulate a command
 		remaining = sizeof(state->cmd_buf);
-		
+
 #if HAVE_UNIX_DOMAIN_SOCKETS
-		int bytes = recv(state->AcceptedFD, 
+		int bytes = recv(state->AcceptedFD,
 			state->cmd_buf,
 			remaining,
 			MSG_DONTWAIT);
 #endif
 #if HAVE_WINSOCK_SOCKETS
-		int bytes = recv(state->AcceptedFD, 
+		int bytes = recv(state->AcceptedFD,
 			state->cmd_buf,
 			remaining,
 			0);
@@ -2626,7 +2665,7 @@ void RemoteDebug_Init(void)
 #ifdef GDB_SERVER
 	RemoteDebugState_Init(&g_gdbState);
 #endif
-	
+
 #if HAVE_WINSOCK_SOCKETS
 	WORD wVersionRequested;
 	WSADATA wsaData;
@@ -2684,7 +2723,7 @@ bool RemoteDebug_Update(void)
 
 /**
  * Debugger invocation if requested by remote debugger.
- * 
+ *
  * NOTE: we could just run our own loop here, rather than going through DebugUI?
  */
 void RemoteDebug_CheckRemoteBreak(void)

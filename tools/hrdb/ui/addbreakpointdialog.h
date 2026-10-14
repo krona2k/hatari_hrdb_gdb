@@ -3,10 +3,11 @@
 
 #include <QDialog>
 
-class QCheckBox;
-class QLineEdit;
-class QComboBox;
 class QButtonGroup;
+class QCheckBox;
+class QComboBox;
+class QLineEdit;
+class QStackedWidget;
 
 class TargetModel;
 class Dispatcher;
@@ -23,17 +24,26 @@ protected:
     void showEvent(QShowEvent *event);
 
 private:
-    void okClicked();
-    void useClicked();
+    void typeActivated();
+    void setClicked();
+
+    uint64_t GetFlags() const;
 
     TargetModel*        m_pTargetModel;
     Dispatcher*         m_pDispatcher;
 
+    QButtonGroup*       m_pBpTypeButtonGroup;
+    QStackedWidget*     m_pStackedWidget;
+
+    // 0 = expression
     QLineEdit*          m_pExpressionEdit;
 
+    // 1 = memory
     QLineEdit*          m_pMemoryAddressEdit;
-    QComboBox*          m_pMemoryConditionCombo;
-    QButtonGroup*       m_pMemorySizeButtonGroup;
+    QComboBox*          m_pMemorySizeComboBox;
+
+    // 2 - event
+    QComboBox*          m_pEventCombo;
 
     QCheckBox*          m_pOnceCheckBox;
     QCheckBox*          m_pTraceCheckBox;
